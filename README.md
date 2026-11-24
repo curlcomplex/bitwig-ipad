@@ -18,7 +18,25 @@ A repeatable read-only comparison is available:
 python3 scripts/inspect-bitwig-upgrade.py /path/to/6.1.4.app /path/to/6.1.7.app --output evidence/upgrade.json
 ```
 
-Verified for the current appearance change: device build and strict signature check, installation, a live 1133 × 744-point window at origin zero, and an edge-to-edge screenshot with no status icons. The status-bar test passed during orientation requests, but both captured images remained landscape; portrait resizing is not yet physically qualified.
+After building the device host and engine probe, compare both local ARM64 app bundles against that build's compiled bridges and the iPhoneOS SDK:
+
+```sh
+python3 scripts/inventory-native-compat.py /path/to/6.1.4.app /path/to/6.1.7.app \
+  --frameworks build/native-host-tunnel/DerivedData/Build/Products/Debug-iphoneos/BitwigNativeHost.app/Frameworks \
+  --jni-mappings evidence/native-host-device-library-mappings.json \
+  --engine-mappings evidence/native-engine-device-adaptation.json \
+  --output evidence/native-compat.json
+```
+
+Add `--simulator <booted-device>` for system Objective-C method declarations, inheritance and type encodings from an ARM64 iOS Simulator. The report checks mapped dependencies and their re-exports, separates strong imports from weak-definition coalescing entries, and records when a provider cannot be inspected. Objective-C selector references list possible owners from inspected metadata. Explicitly attributed direct calls carry the caller, dispatch kind and inheritance chain. Other calls remain ambiguous. An export or matching selector name alone cannot establish ABI or behavior. Dynamic dispatch, forwarding and selector names built at runtime can escape this inventory. Keep the generated report local.
+
+The 6.1.4 window crash came from `BWWindow` calling the missing inherited frame constraint during a move. The same call also appears in its fullscreen-exit handler, and both sites are present in 6.1.7. The bridge constrains vertical placement to the iPad scene and preserves horizontal placement and the host's adaptive fullscreen policy. The simulator geometry test exercises that inherited method against the compiled bridge.
+
+The audit also found two missing superclass live-resize callbacks on `BWView`. The host resizes its UIKit scene through layout callbacks. The original desktop live-resize sequence has no established caller in the iPad host. The unresolved `CGFontCreateWithPlatformFont` import is in Cairo's legacy ATS font path. Its use in the supported host has not been observed. The 6.1.7 recognizer and key-state dependencies are part of the ongoing multitouch work.
+
+The engine report records a null dereference in the original engine's render callback about 25 ms after the frontend aborted. Connection teardown is a hypothesis. Reproducing the callback fault with engine lifecycle evidence is required to establish its cause.
+
+The earlier fullscreen and icon update was installed and checked with a live 1133 × 744-point window at origin zero and an edge-to-edge screenshot with no status icons. Both captures from the status-bar rotation check remained in landscape. Physical portrait behavior and the new frame-constraint fix still need their own device evidence.
 
 ## Source and local prerequisites
 
