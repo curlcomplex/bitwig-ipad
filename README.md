@@ -8,7 +8,7 @@ Bitwig Studio 6.1.4 has run on a physical iPad mini A17 Pro: the original interf
 
 The main resizable window follows the current iPad scene bounds. The app hides the status bar and extracts its icon from the user's own Bitwig installation at build time. Menus and dialogs retain their own window geometry.
 
-The host accepts a locally supplied ARM64 Bitwig Studio 6.1.7 bundle. Its original `BWDirectTouchRecognizer` receives UIKit direct contacts with their own identities, coordinates and phases, including cancellation. Indirect pointer input retains the mouse route. The legacy 6.1.4 bundle remains the default. Each engine uses an LLVM ABI profile checked against its loaded Mach-O UUID and original callback slots.
+The host accepts a locally supplied ARM64 Bitwig Studio 6.1.7 bundle. The bridge connects UIKit direct contacts to the original `BWDirectTouchRecognizer` with per-contact identity, coordinates and phases, including cancellation. Indirect pointer input retains the mouse route. The legacy 6.1.4 bundle remains the default. Each engine uses an LLVM ABI profile checked against its loaded Mach-O UUID and original callback slots.
 
 A repeatable read-only comparison is available:
 
@@ -58,6 +58,16 @@ python3 scripts/build-native-host.py --device --embedded-tunnel --embedded-engin
 The audit, engine probe, Java simulator probe and host also accept `--bitwig-app`. Omit both the flag and `BITWIG_APP` to use `/Applications/Bitwig Studio 6.1.4.app`. For a simulator host, run `scripts/build-native-java-probe.py` before building the host. Device builds use the local iOS Java runtime directly.
 
 Builds and diagnostics are isolated under `build/<version>/<source-key>/` and `evidence/<version>/<source-key>/`. The source key is derived from the resolved app path. The builder prints the output location. The host verifies its cached audit and engine adaptation against the selected binaries. Both output directories are excluded from Git. The icon is generated locally into the build asset catalog.
+
+After building the simulator host, point the routing test at its compiled bridge:
+
+```sh
+FRAMEWORKS="$PWD/build/6.1.7/SOURCE_KEY/native-host/Frameworks"
+xcrun --sdk iphonesimulator clang -target arm64-apple-ios17.0-simulator \
+  -fobjc-arc tests/direct-touch-routing.m -framework UIKit -framework Foundation \
+  -L"$FRAMEWORKS" -lBitwigUIKit -Wl,-rpath,"$FRAMEWORKS" -o build/direct-touch-routing
+xcrun simctl spawn booted "$PWD/build/direct-touch-routing"
+```
 
 For device input checks, launch the development host with `--native-touch-trace` to log recognizer attachment and accepted UIKit contact phases. The existing `tap-screen` tool accepts timed contact frames on a trusted device. Each frame includes every still-active contact and any releases, using normalized native digitizer coordinates:
 
