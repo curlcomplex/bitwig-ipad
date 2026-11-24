@@ -1,0 +1,10 @@
+[package]
+name = "bitwig-pair-device"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+idevice = { version = "=0.1.68", default-features = false, features = ["core_device", "display_stream", "core_device_proxy", "remote_pairing", "rsd", "usbmuxd", "tunnel_tcp_stack", "ring"] }
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }

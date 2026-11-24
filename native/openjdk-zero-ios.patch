@@ -1,0 +1,60 @@
+diff --git a/src/hotspot/os/bsd/os_bsd.cpp b/src/hotspot/os/bsd/os_bsd.cpp
+index 9e7620df6..68b8797c8 100644
+--- a/src/hotspot/os/bsd/os_bsd.cpp
++++ b/src/hotspot/os/bsd/os_bsd.cpp
+@@ -1212,7 +1212,9 @@ static void *dlopen_helper(const char *filename, char *ebuf, int ebuflen) {
+ 
+ #ifdef __APPLE__
+ void * os::dll_load(const char *filename, char *ebuf, int ebuflen) {
+-  if (is_vm_statically_linked()) {
++  // Built-in JNI libraries are handled by NativeLibraries' isBuiltin path.
++  // A static VM must still load explicitly named, signed application JNI dylibs.
++  if (is_vm_statically_linked() && filename == nullptr) {
+     return os::get_default_process_handle();
+   }
+ 
+diff --git a/src/hotspot/os_cpu/bsd_zero/os_bsd_zero.cpp b/src/hotspot/os_cpu/bsd_zero/os_bsd_zero.cpp
+index 94d3260c4..cde7a9638 100644
+--- a/src/hotspot/os_cpu/bsd_zero/os_bsd_zero.cpp
++++ b/src/hotspot/os_cpu/bsd_zero/os_bsd_zero.cpp
+@@ -45,6 +45,7 @@
+ #include "runtime/osThread.hpp"
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/stubRoutines.hpp"
++#include "runtime/thread.inline.hpp"
+ #include "runtime/timer.hpp"
+ #include "signals_posix.hpp"
+ #include "utilities/events.hpp"
+@@ -274,10 +275,32 @@ int os::extra_bang_size_in_bytes() {
+ }
+ 
+ #if defined(AARCH64) && defined(__APPLE__)
++// Keep the shared Apple W^X bookkeeping complete for the Zero port too.
++// iOS Zero does not request executable writable pages, but shared VM state
++// transitions still reference this state and these accessors.
++WXMode DefaultWXWriteMode = WXWrite;
++THREAD_LOCAL bool os::_jit_exec_enabled;
++
+ void os::current_thread_enable_wx(WXMode mode) {
+ #ifndef __IOS__
+   pthread_jit_write_protect_np(mode == WXExec);
+ #endif
++  _jit_exec_enabled = mode != WXWrite;
++}
++
++bool Thread::wx_enable_write() {
++  if (_wx_state == WXArmedForWrite) {
++    _wx_state = WXWrite;
++    os::current_thread_enable_wx(WXWrite);
++    return true;
++  }
++  return false;
++}
++
++void os::thread_wx_enable_write_impl() {
++  if (!StressWXHealing) {
++    Thread::current()->wx_enable_write();
++  }
+ }
+ #endif
+ 
