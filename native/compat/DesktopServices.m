@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "Trace.h"
 #import <QuartzCore/QuartzCore.h>
 #import <CoreVideo/CoreVideo.h>
 #import <GameController/GameController.h>
@@ -46,7 +47,7 @@ int32_t FSFindFolder(int16_t domain,uint32_t type,unsigned char create,void *ref
         case 'pref': path=[NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"Preferences"];break;
         case 'temp': path=NSTemporaryDirectory();break;
         case 'cusr': path=NSHomeDirectory();break;
-        default: fprintf(stderr,"[compat] FSFindFolder unsupported type 0x%x domain %d\n",type,domain);return -43;
+        default: BWCompatibilityTrace("bridge", "DesktopServices", "FSFindFolder", "unsupported_folder"); fprintf(stderr,"[compat] FSFindFolder unsupported type 0x%x domain %d\n",type,domain);return -43;
     }
     if(directory) path=NSSearchPathForDirectoriesInDomains(directory,NSUserDomainMask,YES).firstObject;
     if(!path) return -43;

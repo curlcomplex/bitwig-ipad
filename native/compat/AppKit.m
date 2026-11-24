@@ -2,10 +2,22 @@
 // delegate to UIKit. Unimplemented selectors retain NSObject's normal exception;
 // they must be implemented from observed use, never swallowed as successful calls.
 #import <UIKit/UIKit.h>
+#import "Trace.h"
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 #include <stdatomic.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+// Scope receiver-failure diagnostics to classes in the compatibility bridge.
+#define BW_TRACE_MISSING_SELECTOR \
+- (void)doesNotRecognizeSelector:(SEL)selector { \
+    BWCompatibilityTrace("objc", object_getClassName(self), sel_getName(selector), "unrecognized"); \
+    [super doesNotRecognizeSelector:selector]; \
+} \
++ (void)doesNotRecognizeSelector:(SEL)selector { \
+    BWCompatibilityTrace("objc-class", class_getName(self), sel_getName(selector), "unrecognized"); \
+    [super doesNotRecognizeSelector:selector]; \
+}
 
 NSString *NSEventTrackingRunLoopMode = @"UITrackingRunLoopMode";
 NSString *NSModalPanelRunLoopMode = @"NSDefaultRunLoopMode";
@@ -49,6 +61,7 @@ typedef NS_OPTIONS(NSUInteger, BWTouchPhaseMask) {
 @end
 
 @implementation NSTouch
+BW_TRACE_MISSING_SELECTOR
 - (NSInteger)type { return 0; } // NSTouchTypeDirect
 - (CGPoint)locationInView:(UIView *)view {
     if (!view) return CGPointMake(self.point.x, self.window.bounds.size.height - self.point.y);
@@ -76,6 +89,7 @@ typedef NS_OPTIONS(NSUInteger, BWTouchPhaseMask) {
 @end
 
 @implementation NSGestureRecognizer
+BW_TRACE_MISSING_SELECTOR
 - (instancetype)initWithTarget:(id)target action:(SEL)action {
     // BWDirectTouchRecognizer supplies nil target/action and handles events
     // in its own override methods.
@@ -112,6 +126,7 @@ static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
 @interface NSScreen : NSObject
 @end
 @implementation NSScreen
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)mainScreen { static id screen; if (!screen) screen=[self new]; return screen; }
 + (NSArray*)screens { return @[[self mainScreen]]; }
 - (CGRect)frame { return UIScreen.mainScreen.bounds; }
@@ -143,6 +158,7 @@ static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
 @property(nonatomic, copy) NSSet<NSTouch *> *directTouches;
 @end
 @implementation NSEvent
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)mouseEventWithType:(NSUInteger)type location:(CGPoint)location modifierFlags:(NSUInteger)flags timestamp:(NSTimeInterval)timestamp windowNumber:(NSInteger)number context:(id)context eventNumber:(NSInteger)eventNumber clickCount:(NSInteger)clickCount pressure:(float)pressure {
     NSEvent *event=[self new];event.type=type;event.locationInWindow=location;event.modifierFlags=flags;event.timestamp=timestamp;
     event.context=context;event.eventNumber=eventNumber;event.clickCount=clickCount;event.pressure=pressure;
@@ -208,6 +224,11 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 - (void)updateCursor;
 @end
 @implementation NSView
+BW_TRACE_MISSING_SELECTOR
+// AppKit's base live-resize notifications have no effect on an ordinary
+// view. The UIKit scene still owns the actual layout and geometry updates.
+- (void)viewWillStartLiveResize {}
+- (void)viewDidEndLiveResize {}
 + (Class)layerClass { return CAMetalLayer.class; }
 - (void)setWantsLayer:(BOOL)value {
     _wantsLayer=value;
@@ -639,6 +660,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic,copy) NSArray *registeredDraggedTypes;
 @end
 @implementation NSWindow
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithContentRect:(CGRect)rect styleMask:(NSUInteger)style backing:(NSUInteger)backing defer:(BOOL)defer screen:(NSScreen*)screen {
     return [self initWithContentRect:rect styleMask:style backing:backing defer:defer];
 }
@@ -763,6 +785,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic,strong) NSMutableArray<NSEvent*> *postedEvents;
 @end
 @implementation NSApplication
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)sharedApplication { if(!NSApp) NSApp=[self new]; return NSApp; }
 - (NSEvent*)currentEvent { return lastApplicationEvent; }
 - (NSEvent*)nextEventMatchingMask:(NSUInteger)mask untilDate:(NSDate*)date inMode:(NSString*)mode dequeue:(BOOL)dequeue {
@@ -830,6 +853,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic,strong) UIImage *image;
 @end
 @implementation NSImage
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithSize:(CGSize)size { if((self=[super init])){UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:size];_image=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context){}];}return self; }
 - (id)initWithContentsOfFile:(NSString*)path { if((self=[super init])) _image=[UIImage imageWithContentsOfFile:path]; return self; }
 - (id)initWithData:(NSData*)data { if((self=[super init])) _image=[UIImage imageWithData:data]; return self; }
@@ -840,6 +864,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic) CGPoint hotSpot;
 @end
 @implementation NSCursor
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithImage:(NSImage*)image hotSpot:(CGPoint)point { if((self=[super init])){_image=image;_hotSpot=point;}return self; }
 + (instancetype)arrowCursor { static NSCursor *cursor;static dispatch_once_t once;dispatch_once(&once,^{cursor=[self new];});return cursor; }
 - (void)set { cursorImage=self.image.image;cursorHotSpot=self.hotSpot;[hoveredView updateCursor]; }
@@ -849,18 +874,34 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @interface NSImageView : UIImageView @end
 @implementation NSImageView @end
 
+@protocol BWDeclaredPasteboard <NSObject>
+- (NSArray<NSString *> *)declaredTypes;
+- (id)declaredGeneration;
+- (NSData *)dataForType:(NSString *)type;
+- (NSString *)stringForType:(NSString *)type;
+@end
+
 @interface NSPasteboardItem : NSObject
+@property(nonatomic,weak) id<BWDeclaredPasteboard> declaredBoard;
+@property(nonatomic,strong) id declaredGeneration;
+@property(nonatomic) BOOL followsDeclaredTypes;
 @property(nonatomic,strong) NSMutableDictionary<NSString*,id> *representations;
 @property(nonatomic,strong) UIPasteboard *source;
 @property(nonatomic) NSUInteger sourceIndex;
 @end
 @implementation NSPasteboardItem
+BW_TRACE_MISSING_SELECTOR
 - (id)init { if((self=[super init]))_representations=[NSMutableDictionary new];return self; }
 - (NSArray<NSString*>*)types {
+    if(self.declaredGeneration != self.declaredBoard.declaredGeneration)return @[];
+    if(self.followsDeclaredTypes)return self.declaredBoard.declaredTypes;
     if(self.source)return [self.source pasteboardTypesForItemSet:[NSIndexSet indexSetWithIndex:self.sourceIndex]].firstObject?:@[];
     return self.representations.allKeys;
 }
 - (NSData*)dataForType:(NSString*)type {
+    if(self.declaredGeneration != self.declaredBoard.declaredGeneration)return nil;
+    if(self.followsDeclaredTypes)
+        return [self.declaredBoard.declaredTypes containsObject:type] ? [self.declaredBoard dataForType:type] : nil;
     if(self.source)return [self.source dataForPasteboardType:type inItemSet:[NSIndexSet indexSetWithIndex:self.sourceIndex]].firstObject;
     id value=self.representations[type];
     if([value isKindOfClass:NSData.class])return value;
@@ -868,6 +909,9 @@ void BWUIKitSetTextInputActive(BOOL active) {
     return nil;
 }
 - (NSString*)stringForType:(NSString*)type {
+    if(self.declaredGeneration != self.declaredBoard.declaredGeneration)return nil;
+    if(self.followsDeclaredTypes)
+        return [self.declaredBoard.declaredTypes containsObject:type] ? [self.declaredBoard stringForType:type] : nil;
     id value=self.source?[self.source valuesForPasteboardType:type inItemSet:[NSIndexSet indexSetWithIndex:self.sourceIndex]].firstObject:self.representations[type];
     if([value isKindOfClass:NSString.class])return value;
     if([value isKindOfClass:NSData.class])return [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
@@ -877,11 +921,19 @@ void BWUIKitSetTextInputActive(BOOL active) {
 - (BOOL)setString:(NSString*)string forType:(NSString*)type { if(!string||!type)return NO;self.representations[type]=string;return YES; }
 @end
 
-@interface NSPasteboard : NSObject
+@interface NSPasteboard : NSObject <BWDeclaredPasteboard>
 @property(nonatomic,strong) UIPasteboard *pasteboard;
 @property(nonatomic,copy) NSString *logicalName;
+@property(nonatomic,copy) NSArray<NSString *> *declaredTypes;
+@property(nonatomic,strong) id declaredGeneration;
+@property(nonatomic,weak) id declaredOwner;
+@property(nonatomic,strong) NSMutableDictionary<NSString *, id> *declaredValues;
+@property(nonatomic,strong) NSMutableSet<NSString *> *providingTypes;
+@property(nonatomic,strong) NSMutableArray<NSPasteboardItem *> *declaredAdditionalItems;
+@property(nonatomic) NSInteger backingCountAdjustment;
 @end
 @implementation NSPasteboard
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)generalPasteboard { return [self pasteboardWithName:NSPasteboardNameGeneral]; }
 + (instancetype)pasteboardWithName:(NSString*)name {
     static NSMutableDictionary *boards; if(!boards)boards=[NSMutableDictionary new];
@@ -899,11 +951,28 @@ void BWUIKitSetTextInputActive(BOOL active) {
     return board;
 }
 - (NSString*)name { return self.logicalName; }
-- (NSArray<NSString*>*)types { return self.pasteboard.pasteboardTypes; }
+- (NSArray<NSString*>*)types {
+    if(!self.declaredTypes)return self.pasteboard.pasteboardTypes;
+    NSMutableOrderedSet *types = [NSMutableOrderedSet orderedSetWithArray:self.declaredTypes];
+    for(NSPasteboardItem *item in self.declaredAdditionalItems)
+        [types addObjectsFromArray:item.types];
+    return types.array;
+}
 - (NSArray<NSPasteboardItem*>*)pasteboardItems {
     NSMutableArray *items=[NSMutableArray new];
     // Bitwig polls item types. Keep content lazy so polling does not request
     // cross-application paste permission before the user actually pastes.
+    if(self.declaredTypes.count) {
+        NSPasteboardItem *first=[NSPasteboardItem new];
+        first.declaredBoard=self;
+        first.declaredGeneration=self.declaredGeneration;
+        first.followsDeclaredTypes=YES;
+        [items addObject:first];
+    }
+    if(self.declaredGeneration) {
+        [items addObjectsFromArray:self.declaredAdditionalItems];
+        return items;
+    }
     for(NSUInteger index=0;index<self.pasteboard.numberOfItems;index++){
         NSPasteboardItem *item=[NSPasteboardItem new];
         item.source=self.pasteboard;item.sourceIndex=index;
@@ -911,17 +980,103 @@ void BWUIKitSetTextInputActive(BOOL active) {
     }
     return items;
 }
-- (NSInteger)changeCount { return self.pasteboard.changeCount; }
-- (NSInteger)clearContents { self.pasteboard.items=@[]; return self.pasteboard.changeCount; }
-- (BOOL)setString:(NSString*)text forType:(NSString*)type { if(!text||!type)return NO;[self.pasteboard setValue:text forPasteboardType:type];return YES; }
+- (NSInteger)changeCount { return self.pasteboard.changeCount - self.backingCountAdjustment; }
+- (void)resetBackingItems {
+    NSInteger before = self.pasteboard.changeCount;
+    self.pasteboard.items = @[];
+    self.backingCountAdjustment += self.pasteboard.changeCount - before - 1;
+}
+- (void)notifyPreviousOwner:(id)owner {
+    SEL changed = @selector(pasteboardChangedOwner:);
+    if(owner != self.declaredOwner && [owner respondsToSelector:changed]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ((void(*)(id,SEL,id))objc_msgSend)(owner,changed,self);
+        });
+    }
+}
+- (NSInteger)clearContents {
+    id previous = self.declaredOwner;
+    self.declaredOwner = nil;
+    self.declaredTypes = nil;
+    self.declaredGeneration = nil;
+    self.declaredValues = nil;
+    self.providingTypes = nil;
+    self.declaredAdditionalItems = nil;
+    [self resetBackingItems];
+    [self notifyPreviousOwner:previous];
+    return self.changeCount;
+}
+- (NSInteger)declareTypes:(NSArray<NSString *> *)types owner:(id)owner {
+    BWCompatibilityTrace("bridge", "NSPasteboard", "declareTypes:owner:",
+                         owner ? "declared_with_owner" : "declared_eager");
+    id previous = self.declaredOwner;
+    [self resetBackingItems];
+    self.declaredTypes = [NSOrderedSet orderedSetWithArray:types ?: @[]].array;
+    self.declaredGeneration = [NSObject new];
+    self.declaredOwner = owner;
+    self.declaredValues = [NSMutableDictionary new];
+    self.providingTypes = [NSMutableSet new];
+    self.declaredAdditionalItems = [NSMutableArray new];
+    [self notifyPreviousOwner:previous];
+    return self.changeCount;
+}
+- (BOOL)setDeclaredValue:(id)value forType:(NSString *)type {
+    if(![self.declaredTypes containsObject:type])
+        self.declaredTypes = [self.declaredTypes arrayByAddingObject:type];
+    self.declaredValues[type] = value;
+    return YES;
+}
+- (id)declaredValueForType:(NSString *)type {
+    if(!type || ![self.declaredTypes containsObject:type]) return nil;
+    id value = self.declaredValues[type];
+    id owner = self.declaredOwner;
+    SEL provide = @selector(pasteboard:provideDataForType:);
+    NSMutableSet *requests = self.providingTypes;
+    if(!value && ![requests containsObject:type] && [owner respondsToSelector:provide]) {
+        [requests addObject:type];
+        @try {
+            ((void(*)(id,SEL,id,id))objc_msgSend)(owner,provide,self,type);
+        } @finally {
+            [requests removeObject:type];
+        }
+        if(requests != self.providingTypes)return nil;
+        value = self.declaredValues[type];
+    }
+    return value;
+}
+- (BOOL)setString:(NSString*)text forType:(NSString*)type {
+    if(!text||!type)return NO;
+    if(self.declaredTypes)return [self setDeclaredValue:text forType:type];
+    [self.pasteboard setValue:text forPasteboardType:type];return YES;
+}
 - (NSString*)stringForType:(NSString*)type {
-    id value=[self.pasteboard valueForPasteboardType:type];
+    if(self.declaredGeneration && ![self.declaredTypes containsObject:type]) {
+        for(NSPasteboardItem *item in self.declaredAdditionalItems)
+            if([item.types containsObject:type]) return [item stringForType:type];
+        return nil;
+    }
+    id value=[self.declaredTypes containsObject:type]?[self declaredValueForType:type]:[self.pasteboard valueForPasteboardType:type];
     if([value isKindOfClass:NSString.class])return value;
     if([value isKindOfClass:NSData.class])return [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
     return nil;
 }
-- (NSData*)dataForType:(NSString*)type { return [self.pasteboard dataForPasteboardType:type]; }
-- (BOOL)setData:(NSData*)data forType:(NSString*)type { if(!data||!type)return NO;[self.pasteboard setData:data forPasteboardType:type];return YES; }
+- (NSData*)dataForType:(NSString*)type {
+    if(self.declaredGeneration && ![self.declaredTypes containsObject:type]) {
+        for(NSPasteboardItem *item in self.declaredAdditionalItems)
+            if([item.types containsObject:type]) return [item dataForType:type];
+        return nil;
+    }
+    if(![self.declaredTypes containsObject:type])return [self.pasteboard dataForPasteboardType:type];
+    id value=[self declaredValueForType:type];
+    if([value isKindOfClass:NSData.class])return value;
+    if([value isKindOfClass:NSString.class])return [value dataUsingEncoding:NSUTF8StringEncoding];
+    return nil;
+}
+- (BOOL)setData:(NSData*)data forType:(NSString*)type {
+    if(!data||!type)return NO;
+    if(self.declaredTypes)return [self setDeclaredValue:data forType:type];
+    [self.pasteboard setData:data forPasteboardType:type];return YES;
+}
 - (BOOL)writeObjects:(NSArray<NSPasteboardItem*>*)objects {
     NSMutableArray *items=[NSMutableArray new];
     for(NSPasteboardItem *item in objects){
@@ -929,7 +1084,18 @@ void BWUIKitSetTextInputActive(BOOL active) {
         for(NSString *type in item.types){NSData *data=[item dataForType:type];if(data)values[type]=data;}
         [items addObject:values];
     }
-    [self.pasteboard addItems:items];return YES;
+    if(self.declaredGeneration) {
+        for(NSDictionary *values in items) {
+            NSPasteboardItem *item = [NSPasteboardItem new];
+            item.declaredBoard = self;
+            item.declaredGeneration = self.declaredGeneration;
+            [item.representations addEntriesFromDictionary:values];
+            [self.declaredAdditionalItems addObject:item];
+        }
+        return YES;
+    }
+    [self.pasteboard addItems:items];
+    return YES;
 }
 @end
 
@@ -947,6 +1113,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 
 @interface NSWorkspace : NSObject @end
 @implementation NSWorkspace
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)sharedWorkspace { static id workspace; if(!workspace) workspace=[self new]; return workspace; }
 - (NSNotificationCenter*)notificationCenter { return NSNotificationCenter.defaultCenter; }
 - (NSRunningApplication*)frontmostApplication {
@@ -972,6 +1139,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic) NSInteger tag;
 @end
 @implementation NSMenuItem
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithTitle:(NSString*)title action:(SEL)action keyEquivalent:(NSString*)key {
     if((self=[super init])) {_title=[title copy];_action=action;_keyEquivalent=[key copy];_enabled=YES;}return self;
 }
@@ -986,6 +1154,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 - (UIMenu*)uiMenu;
 @end
 @implementation NSMenu
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithTitle:(NSString*)title { if((self=[super init])){_title=[title copy];_items=[NSMutableArray new];}return self; }
 - (NSArray*)itemArray { return self.items.copy; }
 - (NSInteger)numberOfItems { return self.items.count; }
@@ -1091,15 +1260,22 @@ void BWUIKitPollTestInput(void) {
     [encoded writeToFile:[documents stringByAppendingPathComponent:@"native-ui-result.json"] atomically:YES];
 }
 
-// These types are referenced by the native image. Their operations are not yet
-// implemented; any attempted unsupported selector raises the standard exception.
-#define DECLARE_PENDING_CLASS(NAME, BASE) @interface NAME : BASE @end @implementation NAME @end
-DECLARE_PENDING_CLASS(NSSavePanel, NSPanel)
+// Save selection remains unsupported. The open panel shares this preference
+// with AppKit's save panel, although Files owns iOS directory-management UI.
+@interface NSSavePanel : NSPanel
+@property(nonatomic) BOOL canCreateDirectories;
+@end
+@implementation NSSavePanel
+- (instancetype)init {
+    if((self=[super init])) _canCreateDirectories=YES;
+    return self;
+}
+@end
 
 
 // Native asynchronous Files picker. Imported files live in the shared container
 // so both the frontend and the sandboxed audio engine can read them.
-@interface NSOpenPanel : NSPanel <UIDocumentPickerDelegate>
+@interface NSOpenPanel : NSSavePanel <UIDocumentPickerDelegate>
 @property BOOL allowsMultipleSelection,canChooseDirectories,canChooseFiles,allowsOtherFileTypes,canSelectHiddenExtension,floatingPanel;
 @property(copy) NSArray<NSString*> *allowedFileTypes;
 @property(copy) NSString *nameFieldStringValue;
@@ -1109,9 +1285,19 @@ DECLARE_PENDING_CLASS(NSSavePanel, NSPanel)
 @property(strong) UIDocumentPickerViewController *picker;
 @end
 @implementation NSOpenPanel
-+ (id)openPanel { NSOpenPanel *panel=[self new];panel.canChooseFiles=YES;return panel; }
+- (instancetype)init {
+    if((self=[super init])) {
+        self.canCreateDirectories=NO;
+        _canChooseFiles=YES;
+    }
+    return self;
+}
++ (id)openPanel { return [self new]; }
 - (NSURL*)URL { return self.URLs.firstObject; }
 - (void)beginWithCompletionHandler:(void(^)(NSInteger))completion {
+    BWCompatibilityTrace("bridge", "NSOpenPanel", "beginWithCompletionHandler:", "opened");
+    BWCompatibilityTrace("bridge", "NSOpenPanel", "canCreateDirectories",
+                         self.canCreateDirectories ? "requested_true_files_controls_ui" : "requested_false_files_controls_ui");
     NSLog(@"Native file picker opened files=%d directories=%d multiple=%d",self.canChooseFiles,self.canChooseDirectories,self.allowsMultipleSelection);
     self.completion=completion;
     NSMutableArray<UTType*> *types=[NSMutableArray new];
@@ -1130,6 +1316,7 @@ DECLARE_PENDING_CLASS(NSSavePanel, NSPanel)
     [presenter presentViewController:self.picker animated:YES completion:nil];
 }
 - (void)finishWithURLs:(NSArray<NSURL*>*)urls {
+    BWCompatibilityTrace("bridge", "NSOpenPanel", "finishWithURLs:", urls.count ? "selected" : "no_selection");
     NSLog(@"Native file picker completed count=%lu",(unsigned long)urls.count);
     self.URLs=urls;void(^completion)(NSInteger)=self.completion;self.completion=nil;
     self.picker.delegate=nil;self.picker=nil;
@@ -1173,6 +1360,7 @@ CFTypeRef CFMakeCollectable(CFTypeRef value) { return value; } // GC is disabled
 @property(nonatomic,strong) id imageContents;
 @end
 @implementation NSDraggingItem
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithPasteboardWriter:(id)writer { if((self=[super init]))_item=writer;return self; }
 - (void)setDraggingFrame:(CGRect)frame contents:(id)contents { self.draggingFrame=frame;self.imageContents=contents; }
 @end
@@ -1189,6 +1377,7 @@ CFTypeRef CFMakeCollectable(CFTypeRef value) { return value; } // GC is disabled
 @property(nonatomic) NSInteger draggingFormation;
 @end
 @implementation NSDraggingSession
+BW_TRACE_MISSING_SELECTOR
 - (NSInteger)numberOfValidItemsForDrop { return self.items.count; }
 @end
 static NSDraggingSession *activeDrag;
