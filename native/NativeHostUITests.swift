@@ -1,6 +1,45 @@
 import XCTest
 
 final class NativeHostUITests: XCTestCase {
+    private func compatibilityHost() -> XCUIApplication {
+        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+        XCTAssertEqual(app.frame.size, CGSize(width: 1133, height: 744),
+                       "Open original 6.1.7 Tablet Demo in landscape before running this workflow")
+        return app
+    }
+
+    private func compatibilityTap(_ app: XCUIApplication, _ x: CGFloat, _ y: CGFloat) -> XCUICoordinate {
+        app.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(dx: x - app.frame.minX, dy: y - app.frame.minY))
+    }
+
+    private func compatibilityScreen(_ title: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = title
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    func testCompatibilityFilePickerCancellation() {
+        let app = compatibilityHost()
+        let location = app.staticTexts["On My iPad"].firstMatch
+        if location.exists {
+            compatibilityTap(app, 118, 74).tap()
+            XCTAssertTrue(location.waitForNonExistence(timeout: 8))
+        }
+        compatibilityTap(app, 24, 44).tap()
+        compatibilityScreen("Original File menu")
+        compatibilityTap(app, 55, 100).tap()
+        XCTAssertTrue(location.waitForExistence(timeout: 12))
+        compatibilityScreen("Native file picker")
+        compatibilityTap(app, 118, 74).tap()
+        XCTAssertTrue(location.waitForNonExistence(timeout: 8))
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+        compatibilityScreen("Original project after cancelling file picker")
+    }
+
     func testFullScreenRotation() {
         let app=XCUIApplication(bundleIdentifier:"org.example.bitwigipad.nativehost")
         app.activate()

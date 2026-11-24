@@ -30,3 +30,4 @@ __pycache__/
 !/scripts/inventory-native-compat.py
 !/scripts/inventory-objc-runtime.m
 !/scripts/bitwig_source.py
+!/scripts/compat_discovery.py

@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "../native/compat/Trace.h"
 #include <dlfcn.h>
 #include <jni.h>
 #import <objc/message.h>
@@ -23,6 +24,7 @@ __attribute__((naked,noinline)) static void detachEmbeddedJIT(void) { __asm__("m
 #endif
 
 static void captureNativeException(NSException *exception) {
+    BWCompatibilityTrace("exception", "frontend", exception.name.UTF8String, "uncaught");
     NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
     NSString *description=[NSString stringWithFormat:@"%@\n%@\n",exception,exception.callStackSymbols];
     [description writeToFile:[documents stringByAppendingPathComponent:@"native-exception.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -121,8 +123,10 @@ static void runJava(void) {
     void *nativeImage=dlopen([[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/libbitwig-jni.jnilib"] fileSystemRepresentation],RTLD_NOW|RTLD_LOCAL);
     report[@"native_image_loaded"]=@(nativeImage!=NULL);
     if(!nativeImage) { const char *error=dlerror();report[@"native_image_error"]=error?@(error):@"unknown load error"; }
+    BWCompatibilityTrace("dlopen", "frontend", "libbitwig-jni.jnilib", nativeImage ? "loaded" : "failed");
     save();
     void (*prepareMetal)(void)=dlsym(nativeImage,"BWUIKitPrepareMetal");
+    BWCompatibilityTrace("dlsym", "frontend", "BWUIKitPrepareMetal", prepareMetal ? "resolved" : "missing");
     if(prepareMetal)prepareMetal();
 #endif
     // Simulator runs on the Mac kernel; do not request physical-device TXM debugging.
@@ -150,14 +154,23 @@ static void runJava(void) {
     jint (*create)(JavaVM**, void**, void*) = JNI_CreateJavaVM;
 #else
     void *library = dlopen([[home stringByAppendingPathComponent:@"lib/server/libjvm.dylib"] fileSystemRepresentation], RTLD_NOW | RTLD_GLOBAL);
-    if (!library) { report[@"error"] = @(dlerror()); save(); return; }
+    if (!library) { report[@"error"] = @(dlerror()); BWCompatibilityTrace("dlopen", "frontend", "libjvm.dylib", "failed"); save(); return; }
+    BWCompatibilityTrace("dlopen", "frontend", "libjvm.dylib", "loaded");
     jint (*create)(JavaVM**, void**, void*) = dlsym(library, "JNI_CreateJavaVM");
+    BWCompatibilityTrace("dlsym", "frontend", "JNI_CreateJavaVM", create ? "resolved" : "missing");
     if (!create) { report[@"error"] = @"JNI_CreateJavaVM not exported"; save(); return; }
 #endif
     NSMutableArray *values = [@[@"-Xint", @"-Xms32m", @"-Xmx512m", @"-XX:+UseSerialGC", @"-XX:ReservedCodeCacheSize=64m",
         [@"-Djava.home=" stringByAppendingString:home],
         [NSString stringWithFormat:@"-Djava.class.path=%@/bitwig.jar:%@/libs.jar", NSBundle.mainBundle.bundlePath, NSBundle.mainBundle.bundlePath],
         [NSString stringWithFormat:@"-XX:ErrorFile=%@/hs_err.log", documents]] mutableCopy];
+#if defined(FULL_BITWIG_HOST) && !defined(STATIC_ZERO)
+    if (BWCompatibilityTracing()) {
+        [values addObject:[NSString stringWithFormat:
+            @"-Xlog:library=debug,jni+resolve=debug:file=%@/native-compat-jvm.log:uptime,tags:filecount=2,filesize=128K",
+            documents]];
+    }
+#endif
 #if !TARGET_OS_SIMULATOR && defined(FULL_BITWIG_HOST) && !defined(STATIC_ZERO)
     report[@"execution_mode"]=@"interpreter";
     if(![NSProcessInfo.processInfo.arguments containsObject:@"--native-java-interpreter"]){
