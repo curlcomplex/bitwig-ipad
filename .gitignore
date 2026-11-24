@@ -27,3 +27,5 @@ __pycache__/
 !/scripts/native-host-control.py
 !/scripts/test-native-host-ui.py
 !/scripts/inspect-bitwig-upgrade.py
+!/scripts/inventory-native-compat.py
+!/scripts/inventory-objc-runtime.m
