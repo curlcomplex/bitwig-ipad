@@ -10,7 +10,7 @@ final class NativeHostUITests: XCTestCase {
             XCTAssertTrue(app.wait(for:.runningForeground,timeout:5))
             XCTAssertFalse(app.statusBars.firstMatch.exists)
             let capture=XCTAttachment(screenshot:XCUIScreen.main.screenshot())
-            capture.name=orientation == .portrait ? "Full screen portrait" : "Full screen landscape"
+            capture.name=orientation == .portrait ? "Requested portrait" : "Requested landscape"
             capture.lifetime = .keepAlways;add(capture)
         }
     }
