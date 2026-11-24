@@ -361,6 +361,21 @@ void BWUIKitSetTextInputActive(BOOL active) {
 }
 - (void)registerForDraggedTypes:(NSArray*)types { self.registeredDraggedTypes=types; } // Drop event delivery is not implemented yet.
 - (CGRect)frame { return self.desktopFrame; }
+- (CGRect)constrainFrameRect:(CGRect)frame toScreen:(NSScreen *)screen {
+    CGRect visible = (screen ?: self.screen).visibleFrame;
+    if (screen == nil || screen == self.screen) {
+        UIWindowScene *scene = self.uiWindow.windowScene;
+        if (scene) visible = scene.coordinateSpace.bounds;
+    }
+    if (CGRectIsEmpty(visible)) return frame;
+
+    // AppKit constrains the top edge in desktop (bottom-left) coordinates.
+    CGFloat top = CGRectGetMaxY(frame);
+    if (self.styleMask & 8) frame.size.height = MIN(frame.size.height, CGRectGetHeight(visible));
+    CGFloat minimumTop = CGRectGetMinY(visible) + MIN(frame.size.height, CGRectGetHeight(visible));
+    frame.origin.y = MIN(MAX(top, minimumTop), CGRectGetMaxY(visible)) - frame.size.height;
+    return frame;
+}
 - (CGSize)contentMinSize { return self.minSize; }
 - (void)setContentMinSize:(CGSize)size { self.minSize=size;self.uiWindow.windowScene.sizeRestrictions.minimumSize=size; }
 - (CGSize)contentMaxSize { return self.maxSize; }
