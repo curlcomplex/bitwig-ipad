@@ -130,7 +130,8 @@ for dep in audit['dependencies']:
 info = java_probe_info()
 if args.embedded_engine: info['UIBackgroundModes']=['audio']
 info.update(UIStatusBarHidden=True,UIViewControllerBasedStatusBarAppearance=False,UIRequiresFullScreen=True,CFBundleDisplayName='Bitwig',CFBundleIdentifier='com.felixgodden.bitwigipad.nativehost',CFBundleExecutable='BitwigNativeHost',CFBundleName='Bitwig Native Host')
-if args.device:info.update(UIFileSharingEnabled=True,LSSupportsOpeningDocumentsInPlace=True,NSLocalNetworkUsageDescription='The embedded Java JIT helper connects to this iPad through its local developer tunnel.')
+info.update(UIFileSharingEnabled=True,LSSupportsOpeningDocumentsInPlace=True)
+if args.device:info.update(NSLocalNetworkUsageDescription='The embedded Java JIT helper connects to this iPad through its local developer tunnel.')
 # Extract the icon from the user's licensed local installation, never distribute it.
 icons=BUILD/'Assets.xcassets/AppIcon.appiconset';icons.mkdir(parents=True,exist_ok=True)
 run('sips','-s','format','png',SOURCE/'Resources/Bitwig Studio.icns','--out',icons/'AppIcon.png')

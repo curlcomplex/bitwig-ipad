@@ -95,7 +95,7 @@ def jni_escape(text):
     return ''.join(parts)
 
 
-def match_bindings(declarations, exports):
+def match_bindings(declarations, exports, source_roles=None):
     signatures = {}
     for row in declarations:
         signatures.setdefault((row['class'], row['method']), set()).add(row['descriptor'])
@@ -105,6 +105,10 @@ def match_bindings(declarations, exports):
         long = short + '__' + jni_escape(descriptor[1:descriptor.index(')')])
         matches = [{'name': name, 'images': sorted(exports[name])}
                    for name in (short, long) if name in exports]
+        if source_roles is not None:
+            for match in matches:
+                match['scope'] = 'original_source_binary_only'
+                match['source_roles'] = {path: source_roles[path] for path in match['images']}
         if not matches:
             status = 'unresolved_or_runtime_registered'
         elif short in exports and len(signatures[owner, method]) > 1:
@@ -165,6 +169,10 @@ def discover(app, scratch, known):
             path = root / name
             relative = path.relative_to(app).as_posix()
             counters['bundle_files'] += 1
+            if relative.startswith(('PlugIns/JavaVM-arm64.bundle/', 'PlugIns/JavaVM-x64.bundle/')) and relative.endswith('/lib/modules'):
+                uninspected.append({'path': relative, 'reason': 'JIMAGE container',
+                                    'role': 'replaced_by_ios_jvm'})
+                continue
             if path.is_symlink():
                 uninspected.append({'path': relative, 'reason': 'file symlink not followed'})
                 continue
@@ -182,7 +190,8 @@ def discover(app, scratch, known):
                 uninspected.append({'path': relative, 'reason': str(error)})
                 continue
             if detected:
-                role = 'replaced_by_ios_jvm' if relative.startswith('PlugIns/JavaVM-arm64.bundle/') else 'optional_bundle_native'
+                role = ('replaced_by_ios_jvm' if relative.startswith(('PlugIns/JavaVM-arm64.bundle/', 'PlugIns/JavaVM-x64.bundle/'))
+                        else 'optional_bundle_native')
                 images.append((relative, path, detected, known.get(relative, role)))
             elif path.suffix.lower() in ('.dylib', '.jnilib', '.dll', '.so'):
                 uninspected.append({'path': relative, 'reason': 'unrecognized native format'})
