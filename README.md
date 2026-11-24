@@ -69,14 +69,7 @@ xcrun --sdk iphonesimulator clang -target arm64-apple-ios17.0-simulator \
 xcrun simctl spawn booted "$PWD/build/direct-touch-routing"
 ```
 
-For device input checks, launch the development host with `--native-touch-trace` to log recognizer attachment and accepted UIKit contact phases. The existing `tap-screen` tool accepts timed contact frames on a trusted device that supports CoreDevice remote control. The tested iPadOS 26.6 build requires XCUITest or hands-on input. Each frame includes every still-active contact and any releases, using normalized native digitizer coordinates:
-
-```sh
-tap-screen "$BITWIG_DEVICE_UDID" --frames \
-  '0:0,20000,40000,down;1,26000,40000,down' \
-  '700:0,20000,40000,up;1,26000,40000,down' \
-  '400:1,26000,40000,up'
-```
+For device input checks, launch the development host with `--native-touch-trace` to log recognizer attachment and UIKit contact phases. Use XCUITest to check simultaneous UIKit delivery and hands-on input to check the original keyboard and radial gestures on the iPad. CoreDevice remote-control input is unavailable on the tested iPadOS 26.6 build.
 
 ## Limitations
 
