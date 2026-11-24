@@ -10,6 +10,7 @@ import plistlib
 import re
 import subprocess
 import tempfile
+from compat_discovery import correlate_jvm, discover, match_bindings
 
 TARGETS = {
     'launcher': 'MacOS/BitwigStudio',
@@ -25,7 +26,15 @@ ADAPTED = {
     'engine': 'BitwigAudioEngine.bundle',
     'native_foundation': 'JavaNativeFoundation',
     'sqlite': 'libsqlitejdbc.jnilib',
+    'jna': 'libjnidispatch.jnilib',
 }
+ROLES = {'launcher': 'replaced_by_uikit_host', 'mac_jvm': 'replaced_by_ios_jvm',
+         'plugin_host': 'optional_desktop_plugin_host'}
+LOOKUPS = {'dlopen': 0, 'dlsym': 1, 'NSClassFromString': 0, 'NSSelectorFromString': 0,
+           'objc_getClass': 0, 'objc_lookUpClass': 0, 'sel_registerName': 0,
+           'CFBundleGetFunctionPointerForName': 1, 'CFBundleGetDataPointerForName': 1}
+SELECTOR_LOOKUPS = {'respondsToSelector:', 'instancesRespondToSelector:', 'methodForSelector:',
+                    'instanceMethodForSelector:', 'performSelector:', 'performSelector:withObject:'}
 
 # Receiver evidence is deliberately explicit. A selector reference alone cannot
 # identify its receiver or even distinguish an instance send from a class send.
@@ -88,37 +97,101 @@ def selector_slots(image):
 
 def direct_dispatches(image, entries, slots, scope):
     """Resolve direct super calls with local selector and superclass evidence."""
-    if not entries:
-        return []
     functions = sorted(int(match, 16) for match in re.findall(
         r'^\s+0x([\da-fA-F]+)\s+', dyld('-function_starts', image), re.M
     ))
     if not functions:
-        return []
+        return [], [], {}
+    function_addresses = set(functions)
     instruction = re.compile(r'^0x([\da-fA-F]+)\s+(\S+)\s+(.*)')
     sends = []
+    lookups = []
+    registers = {}
+    counts = defaultdict(int)
     recent = deque(maxlen=8)
+    current = None
     with subprocess.Popen(['xcrun', 'dyld_info', '-arch', 'arm64', '-disassemble', str(image)],
                           stdout=subprocess.PIPE, text=True) as disassembly:
         for line in disassembly.stdout:
-            if '_objc_msgSendSuper2' not in line and FRAME_SELECTOR not in line:
+            call = instruction.match(line)
+            if not call:
+                registers.clear()
+                recent.clear()
+                continue
+            address, opcode = int(call[1], 16), call[2]
+            operand = call[3].split(';', 1)[0].strip().strip('"')
+            if current != address and address in entries:
+                current = address
+                registers = {0: (entries[address][1], entries[address][0], 'method entry self')}
+            elif address in function_addresses:
+                registers.clear()
+            if opcode not in ('bl', 'b'):
+                destination = re.match(r'[xw](\d+)(?:,|$)', operand)
+                if opcode.startswith('blr'):
+                    registers = {key: value for key, value in registers.items() if 19 <= key <= 28}
+                    recent.clear()
+                elif opcode.startswith(('b.', 'cb', 'tb', 'ret', 'br', 'eret')):
+                    registers.clear()
+                    recent.clear()
+                elif opcode == 'ldp':
+                    for register in re.findall(r'[xw](\d+),', operand.split('[', 1)[0]):
+                        registers.pop(int(register), None)
+                elif opcode == 'stp' or opcode.startswith(('str', 'cmp', 'tst')):
+                    pass
+                elif destination:
+                    register = int(destination[1])
+                    origin = re.fullmatch(r'x\d+, x(\d+)', operand) if opcode == 'mov' else None
+                    class_ref = re.search(r';.*\b_OBJC_CLASS_\$_(\w+)', line) if opcode == 'ldr' else None
+                    literal = re.search(r';\s*"([^"]+)"', line) if opcode in ('ldr', 'add', 'adr') else None
+                    if origin and int(origin[1]) in registers:
+                        registers[register] = registers[int(origin[1])]
+                    elif class_ref:
+                        registers[register] = (class_ref[1], '+', 'class reference in disassembly')
+                    elif literal:
+                        registers[register] = (literal[1], None, 'annotated literal')
+                    else:
+                        registers.pop(register, None)
                 recent.append(line)
                 continue
-            call = instruction.match(line)
-            if not call or call[2] not in ('bl', 'b'):
+            receiver = registers.get(0)
+            arguments = registers
+            if opcode == 'b':
+                registers.clear()
+            else:
+                registers = {key: value for key, value in registers.items() if 19 <= key <= 28}
+            if receiver and operand in ('_objc_alloc', '_objc_alloc_init') and receiver[1] == '+':
+                registers[0] = (receiver[0], '-', receiver[2] + ' via allocation')
+            if receiver and operand in ('_objc_retain', '_objc_retainAutoreleasedReturnValue'):
+                registers[0] = receiver
+            dispatch = operand.removeprefix('_objc_msgSend$') if operand.startswith('_objc_msgSend$') else None
+            lookup = operand.removeprefix('_') if operand.removeprefix('_') in LOOKUPS else dispatch
+            if operand in ('_objc_msgSend', '_objc_msgSendSuper2') or dispatch:
+                counts['objc_direct_dispatch_instructions'] += 1
+            if not dispatch and operand != '_objc_msgSendSuper2' and lookup not in LOOKUPS:
+                recent.append(line)
                 continue
-            address, operand = int(call[1], 16), call[3].strip('" \n')
             index = bisect_right(functions, address) - 1
             entry = entries.get(functions[index]) if index >= 0 else None
-            if not entry:
-                continue
-            kind, cls, caller = entry
-            if operand == '_objc_msgSend$' + FRAME_SELECTOR and cls == 'BWWindow' and caller in {'moveInPixels:', 'windowDidExitFullScreen:'}:
+            kind, cls, caller = entry or (None, None, None)
+            if lookup in LOOKUPS or lookup in SELECTOR_LOOKUPS:
+                argument = arguments.get(LOOKUPS.get(lookup, 2))
+                lookups.append({'address': hex(address), 'api': lookup, 'caller': caller,
+                                'argument_status': 'inferred_literal' if argument and argument[1] is None else 'unresolved_from_direct_call',
+                                'literal_candidate': argument[0] if argument and argument[1] is None else None})
+            if dispatch == FRAME_SELECTOR and cls == 'BWWindow' and caller in {'moveInPixels:', 'windowDidExitFullScreen:'}:
                 source = 'verified self dispatch in ARM64 disassembly'
                 if caller == 'moveInPixels:' and scope == '6.1.4':
                     source += ' and observed 6.1.4 crash backtrace'
                 sends.append((address, kind, cls, caller, FRAME_SELECTOR, 'self', source))
-            if operand == '_objc_msgSendSuper2':
+            elif dispatch and receiver and receiver[1]:
+                sends.append((address, receiver[1], receiver[0], caller, dispatch,
+                              'direct', receiver[2]))
+            if dispatch and receiver and receiver[1] and opcode == 'bl':
+                if dispatch in ('alloc', 'new') and receiver[1] == '+':
+                    registers[0] = (receiver[0], '-', receiver[2] + ' via allocation')
+                elif dispatch.startswith('init') and receiver[1] == '-':
+                    registers[0] = receiver
+            if operand == '_objc_msgSendSuper2' and entry:
                 called = None
                 address_register = None
                 offset = 0
@@ -146,7 +219,9 @@ def direct_dispatches(image, entries, slots, scope):
             recent.append(line)
         if disassembly.wait():
             raise RuntimeError(f'dyld_info disassembly failed for {image.name}')
-    return sends
+    counts['objc_attributed_dispatch_instructions'] = len(sends)
+    counts['dynamic_lookup_direct_calls'] = len(lookups)
+    return sends, lookups, dict(counts)
 
 
 def simulator_methods(simulator, classes):
@@ -333,20 +408,29 @@ def inspect_image(image, component, version, exports, bridge_classes, bridge_met
     referenced = {selector: {'status': 'ambiguous_receiver', 'attributed_calls': [],
                              'candidate_declaration_owners': sorted(owners[selector])}
                   for selector in set(slots.values())}
-    for address, kind, receiver, caller, selector, dispatch, source in direct_dispatches(image, entries, slots, version):
-        if selector in referenced:
-            start = lookup_classes.get(receiver) if dispatch == 'super' else receiver
-            referenced[selector]['attributed_calls'].append({
-                'address': hex(address), 'receiver': receiver, 'kind': kind, 'dispatch': dispatch,
-                'caller': caller, 'evidence': source,
-                **receiver_status(start, kind, selector, lookup_classes, lookup_methods, missing_classes, runtime),
-            })
+    sends, dynamic, counts = direct_dispatches(image, entries, slots, version)
+    for address, kind, receiver, caller, selector, dispatch, source in sends:
+        if selector not in referenced:
+            referenced[selector] = {'status': 'direct_dispatch_only', 'attributed_calls': [],
+                                     'candidate_declaration_owners': sorted(owners[selector])}
+        start = lookup_classes.get(receiver) if dispatch == 'super' else receiver
+        referenced[selector]['attributed_calls'].append({
+            'address': hex(address), 'receiver': receiver, 'kind': kind, 'dispatch': dispatch,
+            'caller': caller, 'evidence': source,
+            'confidence': 'inferred_local_dataflow' if dispatch == 'direct' else 'attributed',
+            **receiver_status(start, kind, selector, lookup_classes, lookup_methods, missing_classes, runtime),
+        })
+    symbols = set(re.findall(r'^\s+0x[\da-fA-F]+\s+_((?:Java_|JNI_)[^\s]+)', dyld('-exports', image), re.M))
     return {
         'dependencies': dependencies,
         'imports': records,
         'defined_classes': {name: {'superclass': parent, 'methods': sorted(methods.get(name, set()))}
                             for name, parent in classes.items()},
         'selector_references': referenced,
+        'selector_slot_count': len(slots),
+        'direct_dispatch_counts': counts,
+        'dynamic_lookup_calls': dynamic,
+        'jni_exports': sorted(symbols),
     }
 
 
@@ -358,8 +442,13 @@ def main():
     parser.add_argument('--jni-mappings', type=Path, required=True, help='native-host-device-library-mappings.json')
     parser.add_argument('--engine-mappings', type=Path, required=True, help='native-engine-device-adaptation.json')
     parser.add_argument('--simulator', help='Booted ARM64 iOS Simulator identifier for optional system method evidence')
+    parser.add_argument('--runtime-version', choices=['6.1.4', '6.1.7'])
+    parser.add_argument('--jvm-trace', type=Path, action='append', default=[],
+                        help='Retained HotSpot trace file from the stated runtime version; repeat for rotated logs')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    if bool(args.runtime_version) != bool(args.jvm_trace):
+        parser.error('--runtime-version and at least one --jvm-trace must be provided together')
     sdk = Path(xcrun('--sdk', 'iphoneos', '--show-sdk-path').strip())
     host_map = json.loads(args.jni_mappings.read_text())
     engine_map = json.loads(args.engine_mappings.read_text())['dependency_mappings']
@@ -374,6 +463,20 @@ def main():
         if version != expected_version:
             parser.error(f'expected {expected_version}, got {version}')
         apps[version] = app
+    # Only the recognized launch set receives a projected dependency mapping.
+    # Newly discovered native code remains optional until build/load evidence exists.
+    with tempfile.TemporaryDirectory() as root:
+        run_inventory(args, apps, Path(root), bridge_classes, bridge_methods, mappings, exports)
+
+
+def run_inventory(args, apps, scratch, bridge_classes, bridge_methods, mappings, exports):
+    known = {path: ROLES.get(component, 'active_device_engine' if component == 'engine' else component)
+             for component, path in TARGETS.items()}
+    discovered = {}
+    for version, app in apps.items():
+        folder = scratch / version
+        folder.mkdir()
+        discovered[version] = discover(app, folder, known)
     runtime = {}
     if args.simulator:
         class_prefix = '_OBJC_CLASS_$_'
@@ -383,20 +486,43 @@ def main():
         system_classes.update(parent for parent in bridge_classes.values() if parent)
         runtime = simulator_methods(args.simulator, system_classes - bridge_classes.keys())
     report = {
-        'scope': 'Static ARM64 import, export and selector evidence against the same iPad device build. Candidate retargeting is projected from its original dependency paths. Export visibility does not establish ABI or supported behavior. Indirect sends, dynamic runtime lookups, forwarding and selector strings outside __objc_selrefs are not exhaustively covered.',
+        'scope': 'Mach-O ARM64 imports, exports, Objective-C and direct lookup instructions are static evidence against the supplied bridges. Mapping is projected from original dependency paths. Name or export evidence does not establish ABI, active loading, or supported behavior. Indirect sends, register resolution with control-flow joins, dynamic lookups and forwarding are incomplete.',
         'system_methods': 'ARM64 iOS Simulator runtime. Device availability and ABI compatibility require separate verification.' if args.simulator else 'System runtime method lookup disabled.',
         'bridge_classes': {name: {'superclass': parent, 'methods': sorted(bridge_methods.get(name, set()))}
                            for name, parent in bridge_classes.items()},
         'versions': {},
+        'discovery': {},
     }
-    for version, app in apps.items():
-        scanned = {name: inspect_image(app / path, name, version, exports, bridge_classes, bridge_methods, mappings, runtime)
-                   for name, path in TARGETS.items()}
+    for version, (records, inspectable, declarations, counters, uninspected) in discovered.items():
+        scanned = {}
+        bindings = defaultdict(set)
+        for record in records:
+            relative = record['path']
+            if relative not in inspectable:
+                continue
+            name = next((name for name, path in TARGETS.items() if path == relative), relative)
+            if record['role'] == 'jna':
+                name = 'jna'
+            if name in ADAPTED and name != 'engine':
+                record['role'] = 'adapted_host_library'
+            try:
+                scanned[name] = inspect_image(inspectable[relative], name, version, exports,
+                                              bridge_classes, bridge_methods, mappings, runtime)
+            except (subprocess.CalledProcessError, RuntimeError) as error:
+                record['status'] = 'inspection_failed'
+                uninspected.append({'path': relative, 'reason': type(error).__name__})
+                continue
+            record['status'] = 'arm64_inspected'
+            for symbol in scanned[name]['jni_exports']:
+                bindings[symbol].add(relative)
+        match_bindings(declarations, bindings)
         report['versions'][version] = scanned
-        for name, result in scanned.items():
-            gaps = sum(row['status'] == 'required_export_absent' for row in result['imports'])
-            print(f"{version} {name}: {len(result['imports'])} imports, "
-                  f"{len(result['selector_references'])} selector references, {gaps} absent required exports")
+        report['discovery'][version] = {'images': records, 'denominators': counters,
+                                        'uninspected': uninspected, 'jni_declarations': declarations}
+        if version == args.runtime_version:
+            report['discovery'][version]['jvm_observations'] = correlate_jvm(declarations, args.jvm_trace)
+        print(f"{version}: {len(scanned)} of {len(records)} native candidates inspected as ARM64, "
+              f"{len(declarations)} JNI declarations from {counters.get('classfiles_parsed', 0)} classfiles")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
 
