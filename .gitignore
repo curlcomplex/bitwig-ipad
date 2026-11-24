@@ -26,3 +26,4 @@ __pycache__/
 !/scripts/build-native-java-probe.py
 !/scripts/native-host-control.py
 !/scripts/test-native-host-ui.py
+!/scripts/inspect-bitwig-upgrade.py
