@@ -594,18 +594,22 @@ void BWUIKitSetTextInputActive(BOOL active) {
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 @end
 
+// These AppKit bits are supplied by the original BWWindow constructor.
+static const NSUInteger BWWindowResizable = 1ul << 3;
+static const NSUInteger BWWindowFullScreenPrimary = 1ul << 7;
+static const NSUInteger BWWindowFullScreenAuxiliary = 1ul << 8;
+
+@protocol BWSceneWindow
+- (void)bwSyncSceneFrame;
+@end
+
 @interface BWUIKitWindow : UIWindow
 @property(nonatomic,weak) id desktopWindow;
 @end
 @implementation BWUIKitWindow
 - (void)layoutSubviews {
     [super layoutSubviews];
-    id desktop=self.desktopWindow;
-    if (desktop && (((NSUInteger(*)(id,SEL))objc_msgSend)(desktop,@selector(styleMask))&8)) {
-        CGRect bounds=self.windowScene.coordinateSpace.bounds;
-        if (!CGRectEqualToRect([desktop frame],bounds))
-            ((void(*)(id,SEL,CGRect,BOOL))objc_msgSend)(desktop,@selector(setFrame:display:),bounds,YES);
-    }
+    [(id<BWSceneWindow>)self.desktopWindow bwSyncSceneFrame];
 }
 - (BOOL)respondsToSelector:(SEL)selector { return [super respondsToSelector:selector]||[self.desktopWindow respondsToSelector:selector]; }
 - (BOOL)canBecomeKeyWindow { return self.desktopWindow?((BOOL(*)(id,SEL))objc_msgSend)(self.desktopWindow,@selector(canBecomeKeyWindow)):[super canBecomeKeyWindow]; }
@@ -632,7 +636,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
     return [super forwardingTargetForSelector:selector];
 }
 @end
-@interface NSWindow : NSObject
+@interface NSWindow : NSObject <BWSceneWindow>
 @property(nonatomic,strong) UIWindow *uiWindow;
 @property(nonatomic,strong) NSView *contentView;
 @property(nonatomic,weak) id delegate;
@@ -648,6 +652,10 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic) BOOL miniaturized;
 @property(nonatomic) CGRect frameBeforeZoom;
 @property(nonatomic) CGRect desktopFrame;
+@property(nonatomic) CGRect initialFrame;
+@property(nonatomic) CGRect requestedFrame;
+@property(nonatomic) BOOL requestedFullScene;
+@property(nonatomic) BOOL hasBeenShown;
 // Desktop policy hints retained for callers. UIKit owns scene movement,
 // capture policy and background hiding; these hints cannot override it.
 @property(nonatomic) BOOL canHide;
@@ -670,11 +678,12 @@ BW_TRACE_MISSING_SELECTOR
         UIWindowScene *scene=(UIWindowScene*)UIApplication.sharedApplication.connectedScenes.anyObject;
         BWUIKitWindow *window=[[BWUIKitWindow alloc] initWithWindowScene:scene];
         window.desktopWindow=self;_uiWindow=window;
-        if(style&8)rect=scene.coordinateSpace.bounds;
-        _desktopFrame=rect;
-        _uiWindow.frame=CGRectMake(rect.origin.x,scene.coordinateSpace.bounds.size.height-CGRectGetMaxY(rect),rect.size.width,rect.size.height);
         _uiWindow.rootViewController=[BWHostViewController new];
         _styleMask=style;
+        _initialFrame=rect;
+        _requestedFrame=rect;
+        [self applyDesktopFrame:rect];
+        [self recordFullSceneRequest:rect];
         _movable=YES;
         static NSInteger nextNumber=1;_windowNumber=nextNumber++;
         _maxSize=CGSizeMake(CGFLOAT_MAX,CGFLOAT_MAX);
@@ -683,6 +692,41 @@ BW_TRACE_MISSING_SELECTOR
     }
     return self;
 }
+- (CGRect)bwSceneBounds { return self.uiWindow.windowScene.coordinateSpace.bounds; }
+
+- (BOOL)bwFollowsScene {
+    return self.requestedFullScene && (self.styleMask & BWWindowResizable) &&
+           (self.collectionBehavior & BWWindowFullScreenPrimary) &&
+           !(self.collectionBehavior & BWWindowFullScreenAuxiliary);
+}
+
+- (void)recordFullSceneRequest:(CGRect)request {
+    // Only the original initial placement signals the editor's scene-sized
+    // intent. Later frame changes (including Zoom) retain normal desktop rules.
+    CGRect sceneBounds = self.bwSceneBounds;
+    if (!self.hasBeenShown && !self.isVisible)
+        self.requestedFullScene = !CGRectIsEmpty(sceneBounds) && CGRectEqualToRect(request, sceneBounds);
+}
+
+- (void)applyDesktopFrame:(CGRect)frame {
+    self.desktopFrame = frame;
+    CGFloat sceneHeight = self.uiWindow.windowScene.coordinateSpace.bounds.size.height;
+    self.uiWindow.frame = CGRectMake(frame.origin.x, sceneHeight - CGRectGetMaxY(frame),
+                                     frame.size.width, frame.size.height);
+}
+
+- (void)setCollectionBehavior:(NSUInteger)behavior {
+    BOOL followed = self.bwFollowsScene;
+    _collectionBehavior = behavior;
+    BOOL follows = self.bwFollowsScene;
+    if (followed == follows) return;
+    CGRect frame = follows ? self.bwSceneBounds : self.requestedFrame;
+    // The vendor declares the role before ordering the window on screen.
+    // Apply that initial frame before emitting move/resize callbacks.
+    if (self.isVisible) [self updateDesktopFrame:frame display:YES];
+    else [self applyDesktopFrame:frame];
+}
+
 - (void)setContentView:(NSView*)view { _contentView=view; self.uiWindow.rootViewController.view=view; }
 - (void)setAllowsConcurrentViewDrawing:(BOOL)allow { self.uiWindow.layer.drawsAsynchronously=allow; }
 - (BOOL)allowsConcurrentViewDrawing { return self.uiWindow.layer.drawsAsynchronously; }
@@ -718,20 +762,32 @@ BW_TRACE_MISSING_SELECTOR
 
     // AppKit constrains the top edge in desktop (bottom-left) coordinates.
     CGFloat top = CGRectGetMaxY(frame);
-    if (self.styleMask & 8) frame.size.height = MIN(frame.size.height, CGRectGetHeight(visible));
+    if (self.styleMask & BWWindowResizable) frame.size.height = MIN(frame.size.height, CGRectGetHeight(visible));
     CGFloat minimumTop = CGRectGetMinY(visible) + MIN(frame.size.height, CGRectGetHeight(visible));
     frame.origin.y = MIN(MAX(top, minimumTop), CGRectGetMaxY(visible)) - frame.size.height;
     return frame;
 }
 - (CGSize)contentMinSize { return self.minSize; }
-- (void)setContentMinSize:(CGSize)size { self.minSize=size;self.uiWindow.windowScene.sizeRestrictions.minimumSize=size; }
+- (void)setContentMinSize:(CGSize)size { self.minSize=size;if(self.bwFollowsScene)self.uiWindow.windowScene.sizeRestrictions.minimumSize=size; }
 - (CGSize)contentMaxSize { return self.maxSize; }
-- (void)setContentMaxSize:(CGSize)size { self.maxSize=size;self.uiWindow.windowScene.sizeRestrictions.maximumSize=size; }
+- (void)setContentMaxSize:(CGSize)size { self.maxSize=size;if(self.bwFollowsScene)self.uiWindow.windowScene.sizeRestrictions.maximumSize=size; }
 - (void)setFrame:(CGRect)frame display:(BOOL)display {
-    if(self.styleMask&8)frame=self.uiWindow.windowScene.coordinateSpace.bounds;
+    CGRect bounds = self.bwSceneBounds;
+    self.requestedFrame = frame;
+    [self recordFullSceneRequest:frame];
+    if (self.bwFollowsScene && !CGRectIsEmpty(bounds)) frame = bounds;
+    [self updateDesktopFrame:frame display:display];
+}
+
+- (void)bwSyncSceneFrame {
+    CGRect bounds = self.bwSceneBounds;
+    if (self.bwFollowsScene && !CGRectIsEmpty(bounds) && !CGRectEqualToRect(self.desktopFrame, bounds))
+        [self updateDesktopFrame:bounds display:NO];
+}
+
+- (void)updateDesktopFrame:(CGRect)frame display:(BOOL)display {
     CGRect previous=self.desktopFrame;
-    self.desktopFrame=frame;
-    self.uiWindow.frame=CGRectMake(frame.origin.x,self.uiWindow.windowScene.coordinateSpace.bounds.size.height-CGRectGetMaxY(frame),frame.size.width,frame.size.height);
+    [self applyDesktopFrame:frame];
     if(display) [self.uiWindow layoutIfNeeded];
     if(!CGPointEqualToPoint(previous.origin,frame.origin)&&[self.delegate respondsToSelector:@selector(windowDidMove:)])
         ((void(*)(id,SEL,id))objc_msgSend)(self.delegate,@selector(windowDidMove:),[NSNotification notificationWithName:@"NSWindowDidMoveNotification" object:self]);
@@ -739,15 +795,15 @@ BW_TRACE_MISSING_SELECTOR
         ((void(*)(id,SEL,id))objc_msgSend)(self.delegate,@selector(windowDidResize:),[NSNotification notificationWithName:@"NSWindowDidResizeNotification" object:self]);
 }
 - (void)setContentSize:(CGSize)size { CGRect frame=self.frame; frame.size=size; [self setFrame:frame display:YES]; }
-- (BOOL)isMovable { return _movable && !(self.styleMask & 8); }
+- (BOOL)isMovable { return _movable && !self.bwFollowsScene; }
 - (void)setFrameOrigin:(CGPoint)origin { CGRect frame=self.frame;frame.origin=origin;[self setFrame:frame display:YES]; }
 - (void)setFrameTopLeftPoint:(CGPoint)point { CGRect frame=self.frame;frame.origin=CGPointMake(point.x,point.y-frame.size.height);[self setFrame:frame display:YES]; }
 - (NSScreen*)screen { return NSScreen.mainScreen; }
 - (CGFloat)backingScaleFactor { return self.uiWindow.screen.scale; }
 - (CGRect)convertRectToBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(scale,scale)); }
 - (CGRect)convertRectFromBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(1/scale,1/scale)); }
-- (void)makeKeyAndOrderFront:(id)sender { BOOL wasKey=self.uiWindow.isKeyWindow;[self.uiWindow makeKeyAndVisible];if(wasKey)[(BWUIKitWindow*)self.uiWindow notifyKeyState:YES]; }
-- (void)orderFront:(id)sender { self.uiWindow.hidden=NO; }
+- (void)makeKeyAndOrderFront:(id)sender { self.hasBeenShown=YES; BOOL wasKey=self.uiWindow.isKeyWindow;[self.uiWindow makeKeyAndVisible];if(wasKey)[(BWUIKitWindow*)self.uiWindow notifyKeyState:YES]; }
+- (void)orderFront:(id)sender { self.hasBeenShown=YES; self.uiWindow.hidden=NO; }
 - (void)orderOut:(id)sender { self.uiWindow.hidden=YES; }
 - (void)close { [self.contentView cancelActiveContacts]; self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self]; }
 - (BOOL)isVisible { return self.uiWindow && !self.uiWindow.hidden; }
@@ -758,7 +814,7 @@ BW_TRACE_MISSING_SELECTOR
     else {self.frameBeforeZoom=self.frame;[self setFrame:self.uiWindow.windowScene.coordinateSpace.bounds display:YES];}
 }
 - (void)miniaturize:(id)sender { self.miniaturized=YES;self.uiWindow.hidden=YES; }
-- (void)deminiaturize:(id)sender { self.miniaturized=NO;[self.uiWindow makeKeyAndVisible]; }
+- (void)deminiaturize:(id)sender { self.hasBeenShown=YES; self.miniaturized=NO; [self.uiWindow makeKeyAndVisible]; }
 - (BOOL)isKeyWindow { return self.uiWindow.keyWindow; }
 - (BOOL)makeFirstResponder:(UIResponder*)responder { return [responder becomeFirstResponder]; }
 - (CGRect)contentRectForFrameRect:(CGRect)rect { return rect; }
@@ -824,7 +880,13 @@ BW_TRACE_MISSING_SELECTOR
 - (BOOL)isRunning { return YES; }
 - (NSArray*)windows { return bitwigWindows.allObjects ?: @[]; }
 - (NSWindow*)keyWindow { for(NSWindow *window in self.windows)if(window.isKeyWindow)return window;return nil; }
-- (NSWindow*)mainWindow { return self.keyWindow; }
+- (NSWindow*)mainWindow {
+    NSWindow *key = self.keyWindow;
+    if (key.bwFollowsScene) return key;
+    for (NSWindow *window in self.windows)
+        if (window.isVisible && window.bwFollowsScene) return window;
+    return key;
+}
 - (NSWindow*)windowWithWindowNumber:(NSInteger)number { for(NSWindow *window in self.windows)if(window.windowNumber==number)return window;return nil; }
 - (void)activateIgnoringOtherApps:(BOOL)ignore {
     NSWindow *window=self.keyWindow ?: self.windows.firstObject;
@@ -1205,7 +1267,13 @@ void BWUIKitPollTestInput(void) {
     for(NSWindow *window in bitwigWindows){
         if(window.uiWindow.hidden)continue;
         CGRect frame=window.uiWindow.frame;
-        [windows addObject:@{@"title":window.title?:@"",@"key":@(window.uiWindow.isKeyWindow),@"frame":@[@(frame.origin.x),@(frame.origin.y),@(frame.size.width),@(frame.size.height)]}];
+        CGRect requested = window.requestedFrame, initial = window.initialFrame;
+        [windows addObject:@{@"title":window.title?:@"", @"key":@(window.uiWindow.isKeyWindow),
+                             @"class":NSStringFromClass(window.class), @"style":@(window.styleMask),
+                             @"collection":@(window.collectionBehavior), @"full_scene":@(window.bwFollowsScene),
+                             @"initial_frame":@[@(initial.origin.x), @(initial.origin.y), @(initial.size.width), @(initial.size.height)],
+                             @"requested_frame":@[@(requested.origin.x), @(requested.origin.y), @(requested.size.width), @(requested.size.height)],
+                             @"frame":@[@(frame.origin.x), @(frame.origin.y), @(frame.size.width), @(frame.size.height)]}];
         if(window.uiWindow.isKeyWindow)target=window;
     }
     if([command[@"action"] isEqual:@"click"]){
