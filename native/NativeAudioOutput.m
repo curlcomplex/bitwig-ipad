@@ -1,3 +1,4 @@
+#import "compat/LocalConfiguration.h"
 #import <Foundation/Foundation.h>
 #import <AVFAudio/AVFAudio.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -25,7 +26,7 @@ BOOL BWPrepareAudioOutput(void){
     if(ring){atomic_store(&ring->requestedRunning,0);if(output)AudioOutputUnitStop(output);atomic_store(&ring->actualRunning,0);atomic_store(&ring->readFrame,0);atomic_store(&ring->writeFrame,0);atomic_store(&ring->error,0);return YES;}
     AVAudioSession *session=AVAudioSession.sharedInstance;NSError *error=nil;
     if(![session setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:0 error:&error]||![session setActive:YES error:&error]){NSLog(@"Native output session failed: %@",error);return NO;}
-    NSURL *group=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.org.example.bitwigipad"];
+    NSURL *group=BWSharedContainerURL();
     NSURL *directory=[group URLByAppendingPathComponent:@"BitwigUser/Audio" isDirectory:YES];
     if(![NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:&error])return NO;
     int fd=open([[directory URLByAppendingPathComponent:@"ring.bin"] fileSystemRepresentation],O_CREAT|O_RDWR,0600);if(fd<0)return NO;
