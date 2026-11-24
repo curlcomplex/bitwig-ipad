@@ -11,6 +11,7 @@
 - (void)setMovable:(BOOL)movable;
 - (BOOL)isMovable;
 - (BOOL)bwFollowsScene;
+- (void)bwSyncSceneFrame;
 - (void)setFrame:(CGRect)frame display:(BOOL)display;
 - (CGRect)frame;
 - (void)orderFront:(id)sender;
@@ -23,7 +24,8 @@
 - (CGRect)visibleFrame { return CGRectMake(40, 30, 800, 600); }
 @end
 
-static CGRect testSceneBounds(id self, SEL command) { return CGRectMake(0, 0, 1133, 744); }
+static CGRect sceneBounds = {{0, 0}, {1133, 744}};
+static CGRect testSceneBounds(id self, SEL command) { return sceneBounds; }
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
@@ -72,7 +74,12 @@ int main(int argc, const char *argv[]) {
         [editor setFrame:CGRectMake(0, 0, 1133, 744) display:NO];
         [editor orderFront:nil];
         [editor setFrame:above display:NO];
-        assert(CGRectEqualToRect([editor frame], CGRectMake(0, 0, 1133, 744)));
+        assert(CGRectEqualToRect([editor frame], sceneBounds));
+        sceneBounds = CGRectMake(0, 0, 744, 1133);
+        [editor bwSyncSceneFrame];
+        [window bwSyncSceneFrame];
+        assert(CGRectEqualToRect([editor frame], sceneBounds));
+        assert(CGRectEqualToRect([window frame], CGRectMake(0, 0, 1133, 744)));
         [editor setCollectionBehavior:1u << 8];
         assert(![editor bwFollowsScene] && [editor isMovable]);
         assert(CGRectEqualToRect([editor frame], above));
