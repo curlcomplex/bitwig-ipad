@@ -29,3 +29,4 @@ __pycache__/
 !/scripts/inspect-bitwig-upgrade.py
 !/scripts/inventory-native-compat.py
 !/scripts/inventory-objc-runtime.m
+!/scripts/bitwig_source.py

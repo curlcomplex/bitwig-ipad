@@ -4,6 +4,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
+#include <stdatomic.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 NSString *NSEventTrackingRunLoopMode = @"UITrackingRunLoopMode";
@@ -28,6 +29,78 @@ static NSUInteger cursorHideCount;
 static __weak NSView *hoveredView;
 static __weak NSView *textInputView;
 static BOOL textInputActive;
+static atomic_bool escapePressed;
+
+// CoreGraphics key-state import used by Bitwig to detect a local Escape press.
+bool CGEventSourceKeyState(int32_t source, uint16_t key) {
+    return source == 0 && key == 0x35 && atomic_load_explicit(&escapePressed, memory_order_relaxed);
+}
+
+typedef NS_OPTIONS(NSUInteger, BWTouchPhaseMask) {
+    BWTouchBegan = 1, BWTouchMoved = 2, BWTouchStationary = 4,
+    BWTouchEnded = 8, BWTouchCancelled = 16,
+};
+
+@interface NSTouch : NSObject
+@property(nonatomic, strong) NSNumber *identity;
+@property(nonatomic, weak) UIWindow *window;
+@property(nonatomic) CGPoint point;
+@property(nonatomic) BWTouchPhaseMask phase;
+@end
+
+@implementation NSTouch
+- (NSInteger)type { return 0; } // NSTouchTypeDirect
+- (CGPoint)locationInView:(UIView *)view {
+    if (!view) return CGPointMake(self.point.x, self.window.bounds.size.height - self.point.y);
+    CGPoint local = [view convertPoint:self.point fromView:self.window];
+    if ([view respondsToSelector:@selector(isFlipped)] &&
+        !((BOOL (*)(id, SEL))objc_msgSend)(view, @selector(isFlipped)))
+        local.y = CGRectGetMaxY(view.bounds) - local.y;
+    return local;
+}
+@end
+
+// AppKit recognizers receive NSEvents, independent from UIKit recognizers.
+@interface NSGestureRecognizer : NSObject
+@property(nonatomic, weak) NSView *view;
+@property(nonatomic, weak) id delegate;
+@property(nonatomic, getter=isEnabled) BOOL enabled;
+@property(nonatomic) NSUInteger allowedTouchTypes;
+@property(nonatomic) NSInteger state;
+- (instancetype)initWithTarget:(id)target action:(SEL)action;
+- (void)touchesBeganWithEvent:(id)event;
+- (void)touchesMovedWithEvent:(id)event;
+- (void)touchesEndedWithEvent:(id)event;
+- (void)touchesCancelledWithEvent:(id)event;
+- (void)reset;
+@end
+
+@implementation NSGestureRecognizer
+- (instancetype)initWithTarget:(id)target action:(SEL)action {
+    // BWDirectTouchRecognizer supplies nil target/action and handles events
+    // in its own override methods.
+    if ((self = [super init])) _enabled = YES;
+    return self;
+}
+- (void)touchesBeganWithEvent:(id)event {}
+- (void)touchesMovedWithEvent:(id)event {}
+- (void)touchesEndedWithEvent:(id)event {}
+- (void)touchesCancelledWithEvent:(id)event {}
+- (void)reset { self.state = 0; }
+@end
+
+@interface BWTouchRoute : NSObject
+@property(nonatomic, strong) NSNumber *identity;
+@property(nonatomic, copy) NSArray<NSGestureRecognizer *> *recognizers;
+@property(nonatomic) CGPoint point;
+@end
+
+@implementation BWTouchRoute
+@end
+
+@interface NSObject (BWAppKitTouchDelegate)
+- (BOOL)gestureRecognizer:(NSGestureRecognizer *)recognizer shouldReceiveTouch:(NSTouch *)touch;
+@end
 
 static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
     CGPoint screen=[window convertPoint:point toWindow:nil];
@@ -67,6 +140,7 @@ static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
 @property(nonatomic) BOOL isARepeat;
 @property(nonatomic,copy) NSString *characters;
 @property(nonatomic,copy) NSString *charactersIgnoringModifiers;
+@property(nonatomic, copy) NSSet<NSTouch *> *directTouches;
 @end
 @implementation NSEvent
 + (instancetype)mouseEventWithType:(NSUInteger)type location:(CGPoint)location modifierFlags:(NSUInteger)flags timestamp:(NSTimeInterval)timestamp windowNumber:(NSInteger)number context:(id)context eventNumber:(NSInteger)eventNumber clickCount:(NSInteger)clickCount pressure:(float)pressure {
@@ -75,6 +149,12 @@ static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
     event.buttonNumber=(type==3||type==4||type==7)?1:(type>=25&&type<=27)?2:0;
     for(id window in bitwigWindows.allObjects)if(((NSInteger(*)(id,SEL))objc_msgSend)(window,@selector(windowNumber))==number){event.window=((id(*)(id,SEL))objc_msgSend)(window,@selector(uiWindow));break;}
     return event;
+}
+- (NSSet<NSTouch *> *)touchesMatchingPhase:(BWTouchPhaseMask)phases inView:(UIView *)view {
+    NSMutableSet<NSTouch *> *matches = [NSMutableSet new];
+    for (NSTouch *touch in self.directTouches)
+        if ((touch.phase & phases) && (!view || view.window == touch.window)) [matches addObject:touch];
+    return matches;
 }
 + (NSUInteger)pressedMouseButtons { return pressedMouseButtons; }
 + (CGPoint)mouseLocation { return mouseScreenLocation; }
@@ -120,6 +200,11 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 @property(nonatomic,strong) UIPointerInteraction *pointerInteraction;
 @property(nonatomic,strong) UIImageView *cursorOverlay;
 @property(nonatomic) CGPoint hoverLocation;
+@property(nonatomic, strong) NSMutableArray<NSGestureRecognizer *> *appKitRecognizers;
+@property(nonatomic, strong) NSMapTable<UITouch *, BWTouchRoute *> *touchRoutes;
+@property(nonatomic, strong) UITouch *mouseTouch;
+@property(nonatomic, strong) NSMutableSet<UITouch *> *endingTouches;
+- (void)cancelActiveContacts;
 - (void)updateCursor;
 @end
 @implementation NSView
@@ -151,7 +236,39 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 - (BOOL)acceptsFirstResponder { return self.canBecomeFirstResponder; }
 - (void)viewDidMoveToWindow {}
 - (void)viewDidChangeBackingProperties {}
-- (void)didMoveToWindow { [super didMoveToWindow]; [self viewDidMoveToWindow]; [self viewDidChangeBackingProperties]; }
+- (void)willMoveToWindow:(UIWindow *)newWindow {
+    if (self.window && self.window != newWindow) {
+        [self cancelActiveContacts];
+        [NSNotificationCenter.defaultCenter removeObserver:self
+                                                      name:UISceneWillDeactivateNotification
+                                                    object:self.window.windowScene];
+    }
+    [super willMoveToWindow:newWindow];
+}
+
+- (void)sceneWillDeactivate:(NSNotification *)notification {
+    [self cancelActiveContacts];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window.windowScene)
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneWillDeactivate:)
+                                                   name:UISceneWillDeactivateNotification object:self.window.windowScene];
+    // The vendor constructor attaches this only on macOS 27. Attach the
+    // original recognizer when our UIKit bridge can supply its touch events.
+    Class bitwigView = NSClassFromString(@"BWView");
+    Class directRecognizer = NSClassFromString(@"BWDirectTouchRecognizer");
+    if (self.window && bitwigView && directRecognizer && [self isKindOfClass:bitwigView]) {
+        BOOL attached = NO;
+        for (NSGestureRecognizer *recognizer in self.appKitRecognizers)
+            if ([recognizer isKindOfClass:directRecognizer]) attached = YES;
+        if (!attached)
+            [self addGestureRecognizer:(id)[directRecognizer new]];
+    }
+    [self viewDidMoveToWindow];
+    [self viewDidChangeBackingProperties];
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
     // UIKit resizes via bounds/layout, whereas AppKit invokes setFrameSize:.
@@ -220,10 +337,215 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
     if(type==1||type==2)fprintf(stdout,"[UIKit input] type=%ld window=(%.1f,%.1f) event=(%.1f,%.1f) windowSize=(%.1f,%.1f) viewSize=(%.1f,%.1f)\n",(long)type,current.x,current.y,event.locationInWindow.x,event.locationInWindow.y,self.window.bounds.size.width,self.window.bounds.size.height,self.bounds.size.width,self.bounds.size.height);
     deliverEvent(self,selector,event);
 }
-- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { currentModifierFlags=event.modifierFlags;[self becomeFirstResponder];[self sendTouch:touches.anyObject selector:@selector(mouseMoved:) type:5];[self sendTouch:touches.anyObject selector:@selector(mouseDown:) type:1]; }
-- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { currentModifierFlags=event.modifierFlags;[self sendTouch:touches.anyObject selector:@selector(mouseDragged:) type:6]; }
-- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { currentModifierFlags=event.modifierFlags;[self sendTouch:touches.anyObject selector:@selector(mouseUp:) type:2]; }
-- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { if(!BWHandleDraggingEvent(lastApplicationEvent,YES))[self touchesEnded:touches withEvent:event]; }
+- (void)addGestureRecognizer:(UIGestureRecognizer *)recognizer {
+    if (![(id)recognizer isKindOfClass:NSGestureRecognizer.class]) {
+        [super addGestureRecognizer:recognizer];
+        return;
+    }
+    NSGestureRecognizer *appKit = (id)recognizer;
+    if (appKit.view == self) return;
+    [appKit.view removeGestureRecognizer:recognizer];
+    if (!self.appKitRecognizers) self.appKitRecognizers = [NSMutableArray new];
+    [self.appKitRecognizers addObject:appKit];
+    appKit.view = self;
+    self.multipleTouchEnabled = YES;
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+        fprintf(stdout, "[UIKit direct] attached %s to %s\n",
+                class_getName(appKit.class), class_getName(self.class));
+        fflush(stdout);
+    }
+}
+
+- (void)removeGestureRecognizer:(UIGestureRecognizer *)recognizer {
+    if (![(id)recognizer isKindOfClass:NSGestureRecognizer.class]) {
+        [super removeGestureRecognizer:recognizer];
+        return;
+    }
+    NSGestureRecognizer *appKit = (id)recognizer;
+    if (appKit.view != self) return;
+    [self.appKitRecognizers removeObjectIdenticalTo:appKit];
+    // Reset releases the original recognizer's outstanding contacts. Keep
+    // those UIKit routes closed until their terminal events arrive.
+    [appKit reset];
+    appKit.view = nil;
+    for (BWTouchRoute *route in self.touchRoutes.objectEnumerator) {
+        NSMutableArray *remaining = [route.recognizers mutableCopy];
+        [remaining removeObjectIdenticalTo:appKit];
+        route.recognizers = remaining;
+    }
+    self.multipleTouchEnabled = self.appKitRecognizers.count > 0;
+}
+
+- (NSTouch *)snapshotForRoute:(BWTouchRoute *)route phase:(BWTouchPhaseMask)phase {
+    NSTouch *touch = [NSTouch new];
+    touch.identity = route.identity;
+    touch.window = self.window;
+    touch.point = route.point;
+    touch.phase = phase;
+    return touch;
+}
+
+- (void)beginContacts:(NSSet<UITouch *> *)touches {
+    static NSUInteger nextIdentity;
+    for (UITouch *touch in touches) {
+        if (touch.type == UITouchTypeDirect && self.appKitRecognizers.count) {
+            BWTouchRoute *route = [BWTouchRoute new];
+            route.identity = @(++nextIdentity);
+            route.point = [touch locationInView:self.window];
+            NSTouch *snapshot = [self snapshotForRoute:route phase:BWTouchBegan];
+            NSMutableArray *recipients = [NSMutableArray new];
+            for (NSGestureRecognizer *recognizer in self.appKitRecognizers.copy) {
+                if (!recognizer.enabled || !(recognizer.allowedTouchTypes & 1)) continue;
+                id delegate = recognizer.delegate;
+                if (![delegate respondsToSelector:@selector(gestureRecognizer:shouldReceiveTouch:)] ||
+                    [delegate gestureRecognizer:recognizer shouldReceiveTouch:snapshot])
+                    [recipients addObject:recognizer];
+            }
+            if (recipients.count) {
+                route.recognizers = recipients;
+                if (!self.touchRoutes)
+                    self.touchRoutes = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory |
+                                        NSPointerFunctionsObjectPointerPersonality
+                                                             valueOptions:NSPointerFunctionsStrongMemory];
+                [self.touchRoutes setObject:route forKey:touch];
+                continue;
+            }
+        }
+        if (!self.mouseTouch) {
+            self.mouseTouch = touch;
+            [self sendTouch:touch selector:@selector(mouseMoved:) type:5];
+            [self sendTouch:touch selector:@selector(mouseDown:) type:1];
+        }
+    }
+}
+
+- (void)dispatchContacts:(NSSet<UITouch *> *)changed event:(UIEvent *)uiEvent phase:(BWTouchPhaseMask)phase {
+    BOOL terminal = phase == BWTouchEnded || phase == BWTouchCancelled;
+    if (terminal) {
+        if (!self.endingTouches) self.endingTouches = [NSMutableSet new];
+        [self.endingTouches unionSet:changed];
+    }
+    for (UITouch *touch in changed) {
+        BWTouchRoute *route = [self.touchRoutes objectForKey:touch];
+        if (route) route.point = [touch locationInView:self.window];
+    }
+    for (NSGestureRecognizer *recognizer in self.appKitRecognizers.copy) {
+        NSMutableSet *snapshots = [NSMutableSet new];
+        NSTouch *firstChanged = nil;
+        UITouch *firstUIKitTouch = nil;
+        NSUInteger remaining = 0;
+        for (UITouch *touch in self.touchRoutes.keyEnumerator) {
+            BWTouchRoute *route = [self.touchRoutes objectForKey:touch];
+            if (![route.recognizers containsObject:recognizer]) continue;
+            BOOL updated = [changed containsObject:touch];
+            if (!updated && [self.endingTouches containsObject:touch]) continue;
+            NSTouch *snapshot = [self snapshotForRoute:route phase:updated ? phase : BWTouchStationary];
+            [snapshots addObject:snapshot];
+            if (!terminal || !updated) remaining++;
+            if (!updated) continue;
+            if (!firstChanged) {
+                firstChanged = snapshot;
+                firstUIKitTouch = touch;
+            }
+        }
+        if (!firstChanged) continue;
+        NSEvent *event = [NSEvent new];
+        event.type = 29; // NSEventTypeGesture
+        event.directTouches = snapshots;
+        event.window = self.window;
+        event.timestamp = uiEvent ? uiEvent.timestamp : firstUIKitTouch.timestamp;
+        event.modifierFlags = currentModifierFlags;
+        event.locationInWindow = [firstChanged locationInView:nil];
+        lastApplicationEvent = event;
+        switch (phase) {
+            case BWTouchBegan: [recognizer touchesBeganWithEvent:event]; break;
+            case BWTouchMoved: [recognizer touchesMovedWithEvent:event]; break;
+            case BWTouchEnded: [recognizer touchesEndedWithEvent:event]; break;
+            case BWTouchCancelled: [recognizer touchesCancelledWithEvent:event]; break;
+            case BWTouchStationary: break;
+        }
+        if ([NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+            for (NSTouch *touch in snapshots) {
+                if (touch.phase == BWTouchStationary) continue;
+                fprintf(stdout, "[UIKit direct] recognizer=%s phase=%lu id=%lu active=%lu point=(%.1f,%.1f) state=%ld\n",
+                        class_getName(recognizer.class), (unsigned long)phase, touch.identity.unsignedLongValue,
+                        (unsigned long)remaining, touch.point.x, touch.point.y, (long)recognizer.state);
+            }
+            fflush(stdout);
+        }
+        if (terminal && remaining == 0) [recognizer reset];
+    }
+    if (terminal) {
+        for (UITouch *touch in changed) [self.touchRoutes removeObjectForKey:touch];
+        [self.endingTouches minusSet:changed];
+    }
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    currentModifierFlags = event.modifierFlags;
+    [self becomeFirstResponder];
+    [self beginContacts:touches];
+    [self dispatchContacts:touches event:event phase:BWTouchBegan];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    currentModifierFlags = event.modifierFlags;
+    [self dispatchContacts:touches event:event phase:BWTouchMoved];
+    if (self.mouseTouch && [touches containsObject:self.mouseTouch])
+        [self sendTouch:self.mouseTouch selector:@selector(mouseDragged:) type:6];
+}
+
+- (void)finishContacts:(NSSet<UITouch *> *)touches event:(UIEvent *)event cancelled:(BOOL)cancelled {
+    currentModifierFlags = event.modifierFlags;
+    UITouch *mouse = self.mouseTouch;
+    if (mouse && [touches containsObject:mouse]) self.mouseTouch = nil;
+    else mouse = nil;
+    [self dispatchContacts:touches event:event phase:cancelled ? BWTouchCancelled : BWTouchEnded];
+    if (mouse) {
+        if (!cancelled || !BWHandleDraggingEvent(lastApplicationEvent, YES))
+            [self sendTouch:mouse selector:@selector(mouseUp:) type:2];
+        else
+            pressedMouseButtons &= ~(NSUInteger)1;
+    }
+}
+
+- (void)cancelActiveContacts {
+    NSMutableSet<UITouch *> *active = [NSMutableSet setWithArray:self.touchRoutes.keyEnumerator.allObjects ?: @[]];
+    if (self.mouseTouch) [active addObject:self.mouseTouch];
+    if (self.endingTouches) [active minusSet:self.endingTouches];
+    if (active.count) [self finishContacts:active event:nil cancelled:YES];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self finishContacts:touches event:event cancelled:NO];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self finishContacts:touches event:event cancelled:YES];
+}
+
+- (void)setEscapeForPresses:(NSSet<UIPress *> *)presses down:(BOOL)down {
+    for (UIPress *press in presses) {
+        if (press.key.keyCode == UIKeyboardHIDUsageKeyboardEscape)
+            atomic_store_explicit(&escapePressed, down, memory_order_relaxed);
+    }
+}
+
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    [self setEscapeForPresses:presses down:YES];
+    [super pressesBegan:presses withEvent:event];
+}
+
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    [self setEscapeForPresses:presses down:NO];
+    [super pressesEnded:presses withEvent:event];
+}
+
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    [self setEscapeForPresses:presses down:NO];
+    [super pressesCancelled:presses withEvent:event];
+}
+
 @end
 
 void BWUIKitSetTextInputActive(BOOL active) {
@@ -280,6 +602,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
     dispatch_async(dispatch_get_main_queue(),^{if(self.isKeyWindow)[self notifyKeyState:YES];});
 }
 - (void)resignKeyWindow {
+    atomic_store_explicit(&escapePressed, false, memory_order_relaxed);
     [super resignKeyWindow];
     dispatch_async(dispatch_get_main_queue(),^{if(!self.isKeyWindow)[self notifyKeyState:NO];});
 }
@@ -309,6 +632,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic) BOOL canHide;
 @property(nonatomic) BOOL preservesContentDuringLiveResize;
 @property(nonatomic) BOOL movableByWindowBackground;
+@property(nonatomic, getter=isMovable) BOOL movable;
 @property(nonatomic) BOOL titlebarAppearsTransparent;
 @property(nonatomic) NSInteger titleVisibility;
 @property(nonatomic) NSUInteger sharingType;
@@ -329,6 +653,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
         _uiWindow.frame=CGRectMake(rect.origin.x,scene.coordinateSpace.bounds.size.height-CGRectGetMaxY(rect),rect.size.width,rect.size.height);
         _uiWindow.rootViewController=[BWHostViewController new];
         _styleMask=style;
+        _movable=YES;
         static NSInteger nextNumber=1;_windowNumber=nextNumber++;
         _maxSize=CGSizeMake(CGFLOAT_MAX,CGFLOAT_MAX);
         if(!bitwigWindows)bitwigWindows=[NSHashTable weakObjectsHashTable];
@@ -392,6 +717,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
         ((void(*)(id,SEL,id))objc_msgSend)(self.delegate,@selector(windowDidResize:),[NSNotification notificationWithName:@"NSWindowDidResizeNotification" object:self]);
 }
 - (void)setContentSize:(CGSize)size { CGRect frame=self.frame; frame.size=size; [self setFrame:frame display:YES]; }
+- (BOOL)isMovable { return _movable && !(self.styleMask & 8); }
 - (void)setFrameOrigin:(CGPoint)origin { CGRect frame=self.frame;frame.origin=origin;[self setFrame:frame display:YES]; }
 - (void)setFrameTopLeftPoint:(CGPoint)point { CGRect frame=self.frame;frame.origin=CGPointMake(point.x,point.y-frame.size.height);[self setFrame:frame display:YES]; }
 - (NSScreen*)screen { return NSScreen.mainScreen; }
@@ -401,7 +727,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 - (void)makeKeyAndOrderFront:(id)sender { BOOL wasKey=self.uiWindow.isKeyWindow;[self.uiWindow makeKeyAndVisible];if(wasKey)[(BWUIKitWindow*)self.uiWindow notifyKeyState:YES]; }
 - (void)orderFront:(id)sender { self.uiWindow.hidden=NO; }
 - (void)orderOut:(id)sender { self.uiWindow.hidden=YES; }
-- (void)close { self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self]; }
+- (void)close { [self.contentView cancelActiveContacts]; self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self]; }
 - (BOOL)isVisible { return self.uiWindow && !self.uiWindow.hidden; }
 - (BOOL)isMiniaturized { return self.miniaturized; }
 - (BOOL)isZoomed { return CGRectEqualToRect(self.frame,self.uiWindow.windowScene.coordinateSpace.bounds); }

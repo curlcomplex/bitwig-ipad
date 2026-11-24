@@ -2,13 +2,15 @@
 """Adapt a COPY of the real ARM64 audio engine for an isolated iOS loader check."""
 import argparse, json, plistlib, re, shutil, struct, subprocess
 from pathlib import Path
+from bitwig_source import BitwigSource, ENGINE, ROOT, sha256
 
-root=Path(__file__).resolve().parents[1]
-parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--device',action='store_true');args=parser.parse_args()
-build=root/('build/native-engine-probe-device' if args.device else 'build/native-engine-probe')
+root=ROOT
+parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--device',action='store_true');bitwig=BitwigSource(parser);args=bitwig.args
+build=bitwig.build/('native-engine-probe-device' if args.device else 'native-engine-probe')
 app=build/'BitwigEngineProbe.app'
 frameworks=app/'Frameworks';frameworks.mkdir(parents=True,exist_ok=True)
-source=Path('/Applications/Bitwig Studio 6.1.4.app/Contents/MacOS/Bitwig Audio Engine ARM64-NEON.app/Contents/MacOS/BitwigAudioEngine-ARM64-NEON')
+source=bitwig.contents / ENGINE
+source_identity = bitwig.identity(ENGINE)
 def run(*args):subprocess.run(list(map(str,args)),check=True)
 sdk_name='iphoneos' if args.device else 'iphonesimulator'
 target='arm64-apple-ios17.0'+('' if args.device else '-simulator')
@@ -69,7 +71,7 @@ for fw in ['AppKit','Cocoa','Carbon','CoreServices','CoreGraphics','CoreVideo']:
 info={'CFBundleIdentifier':'com.felixgodden.bitwigipad.engineprobe','CFBundleExecutable':'BitwigEngineProbe','CFBundleName':'Bitwig Engine Probe','CFBundlePackageType':'APPL','CFBundleVersion':'1','CFBundleShortVersionString':'0.1','MinimumOSVersion':'17.0','UIDeviceFamily':[2],'UILaunchScreen':{},'UIApplicationSceneManifest':{'UISceneConfigurations':{'UIWindowSceneSessionRoleApplication':[{'UISceneConfigurationName':'Probe','UISceneDelegateClassName':'EngineProbeScene'}]}}}
 (app/'Info.plist').write_bytes(plistlib.dumps(info))
 evidence='native-engine-device-adaptation.json' if args.device else 'native-engine-adaptation.json'
-(root/'evidence'/evidence).write_text(json.dumps({'original':str(source),'entry_offset':entry,'bundle':str(engine),'dependency_mappings':mapping,'scope':'Loader check; original code unchanged, original file untouched'},indent=2)+'\n')
+(bitwig.evidence/evidence).write_text(json.dumps({'source':source_identity,'adapted_sha256':sha256(engine),'original':str(source),'entry_offset':entry,'bundle':str(engine),'dependency_mappings':mapping,'scope':'Loader check; original code unchanged, original file untouched'},indent=2)+'\n')
 if args.device:
     project={'name':'BitwigEngineProbe','targets':{'BitwigEngineProbe':{
         'type':'application','platform':'iOS','deploymentTarget':'17.0',
