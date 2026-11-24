@@ -8,16 +8,40 @@ import subprocess
 import shutil
 import zipfile
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[1]
+from bitwig_source import BitwigSource, ENGINE, JNI, ROOT, java_probe_info, sha256
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--run',action='store_true')
 parser.add_argument('--device',action='store_true',help='Build/sign the native iPad host with its embedded JIT helper')
 parser.add_argument('--embedded-tunnel',action='store_true',help='Include the local developer tunnel in the iPad app; configuration requires its setup button')
 parser.add_argument('--embedded-engine',action='store_true',help='Include the adapted audio engine in its own native extension process')
-args=parser.parse_args()
+bitwig=BitwigSource(parser);args=bitwig.args
 if args.embedded_tunnel and not args.device: parser.error('--embedded-tunnel requires --device')
 if args.embedded_engine and not args.device: parser.error('--embedded-engine requires --device')
-BUILD=ROOT/('build/native-host-tunnel' if args.embedded_tunnel else 'build/native-host-device' if args.device else 'build/native-host')
+SOURCE = bitwig.contents
+build_name = 'native-host-tunnel' if args.embedded_tunnel else 'native-host-device' if args.device else 'native-host'
+if args.embedded_tunnel and not args.embedded_engine: build_name += '-no-engine'
+if args.embedded_engine and not args.embedded_tunnel: build_name += '-engine'
+BUILD = bitwig.build / build_name
+audit_path = bitwig.evidence / 'native-port-audit.json'
+try:
+    audit = json.loads(audit_path.read_text())['binaries']['jni']
+    if any(audit[key] != value for key, value in bitwig.identity(JNI).items()):
+        raise ValueError('audit is from a different JNI image')
+except (OSError, ValueError, KeyError) as error:
+    parser.error(f'Run audit-native-port.py with the same Bitwig source: {error}')
+if args.embedded_engine:
+    try:
+        adaptation = json.loads((bitwig.evidence / 'native-engine-device-adaptation.json').read_text())
+        engine_app = bitwig.build / 'native-engine-probe-device/BitwigEngineProbe.app'
+        engine_bundle = engine_app / 'Frameworks/BitwigAudioEngine.bundle'
+        entry_path = engine_app / 'engine-entry.json'
+        entry = json.loads(entry_path.read_text())['entry_offset']
+        if (adaptation['source'] != bitwig.identity(ENGINE) or
+                adaptation['adapted_sha256'] != sha256(engine_bundle) or
+                adaptation['entry_offset'] != entry):
+            raise ValueError('adaptation is from a different engine image or is incomplete')
+    except (OSError, ValueError, KeyError) as error:
+        parser.error(f'Run build-native-engine-probe.py --device with the same Bitwig source: {error}')
 LIB=BUILD/'Frameworks'
 LIB.mkdir(parents=True,exist_ok=True)
 sdk_name='iphoneos' if args.device else 'iphonesimulator'
@@ -40,10 +64,10 @@ if args.embedded_engine:
     run(*CC,'-fobjc-arc','-dynamiclib',ROOT/'native/compat/AudioHAL.m',ROOT/'native/compat/AudioOutputProxy.m','-framework','Foundation','-framework','AVFAudio','-Wl,-reexport_framework,CoreAudio','-Wl,-reexport_framework,AudioToolbox','-install_name','@rpath/libAudioHALBridge.dylib','-o',LIB/'libAudioHALBridge.dylib')
     for name in ['libAudioUnitBridge.dylib','libAudioToolboxBridge.dylib']:
         run(*CC,'-dynamiclib',ROOT/'native/compat/Forward.c',f'-Wl,-reexport_library,{LIB / "libAudioHALBridge.dylib"}','-Wl,-rpath,@loader_path','-install_name','@rpath/'+name,'-o',LIB/name)
-with zipfile.ZipFile('/Applications/Bitwig Studio 6.1.4.app/Contents/Java/libs.jar') as jar:
+with zipfile.ZipFile(SOURCE / 'Java/libs.jar') as jar:
     (BUILD/'libjnidispatch.jnilib').write_bytes(jar.read('com/sun/jna/darwin-aarch64/libjnidispatch.jnilib'))
 for name in ['libbitwig-jni.jnilib','JavaNativeFoundation','libsqlitejdbc.jnilib','libjnidispatch.jnilib']:
-    source=Path('/Applications/Bitwig Studio 6.1.4.app/Contents/Frameworks')/name
+    source=(SOURCE / 'Frameworks')/name
     if name=='libjnidispatch.jnilib': source=BUILD/name
     thin=BUILD/(name+'.arm64')
     dest=LIB/name
@@ -75,29 +99,27 @@ for name in ['libbitwig-jni.jnilib','JavaNativeFoundation','libsqlitejdbc.jnilib
     run('codesign','--force','--sign','-',dest)
     mapping[name]=changes
 run('codesign','--force','--sign','-',compat)
-(ROOT/('evidence/native-host-device-library-mappings.json' if args.device else 'evidence/native-host-library-mappings.json')).write_text(json.dumps(mapping,indent=2)+'\n')
+(bitwig.evidence/('native-host-device-library-mappings.json' if args.device else 'native-host-library-mappings.json')).write_text(json.dumps(mapping,indent=2)+'\n')
 print(LIB)
 APP=BUILD/'BitwigNativeHost.app'
 APP.mkdir(exist_ok=True)
 if args.device:
     for folder in ['lib','conf']:shutil.copytree(ROOT/'vendor/java25-ios'/folder,APP/'jre'/folder,dirs_exist_ok=True)
     shutil.copy2(ROOT/'vendor/java25-ios/release',APP/'jre/release')
-else:shutil.copytree(ROOT/'build/native-java/BitwigJavaProbe.app/jre',APP/'jre',dirs_exist_ok=True)
+else:shutil.copytree(bitwig.build/'native-java/BitwigJavaProbe.app/jre',APP/'jre',dirs_exist_ok=True)
 shutil.copytree(LIB,APP/'Frameworks',dirs_exist_ok=True)
 if args.embedded_engine:
-    engine_app=ROOT/'build/native-engine-probe-device/BitwigEngineProbe.app'
-    for name in ['BitwigAudioEngine.bundle']:
-        shutil.copy2(engine_app/'Frameworks'/name,APP/'Frameworks'/name)
-    shutil.copy2(engine_app/'engine-entry.json',APP/'engine-entry.json')
+    shutil.copy2(engine_bundle,APP/'Frameworks'/engine_bundle.name)
+    shutil.copy2(entry_path,APP/'engine-entry.json')
     engine_path=APP/'installation/Contents/MacOS/Bitwig Audio Engine ARM64-NEON.app/Contents/MacOS/BitwigAudioEngine-ARM64-NEON'
     engine_path.parent.mkdir(parents=True,exist_ok=True)
     if not engine_path.is_symlink():engine_path.symlink_to('../../../../../../Frameworks/BitwigAudioEngine.bundle')
-SOURCE=Path('/Applications/Bitwig Studio 6.1.4.app/Contents')
 for name in ['bitwig.jar','libs.jar']: shutil.copy2(SOURCE/'Java'/name,APP/name)
-shutil.copytree(SOURCE/'Resources',APP/'installation/Contents/Resources',dirs_exist_ok=True)
+resources = APP / 'installation/Contents/Resources'
+if resources.exists(): shutil.rmtree(resources)
+shutil.copytree(SOURCE / 'Resources', resources)
 if (APP/'Contents').exists(): shutil.rmtree(APP/'Contents')  # Superseded generated bundle layout.
 manifest=[]
-audit=json.loads((ROOT/'evidence/native-port-audit.json').read_text())['binaries']['jni']
 for dep in audit['dependencies']:
     if 'libbitwig-jni' in dep: continue
     name=dep.split('/')[-1]
@@ -105,7 +127,7 @@ for dep in audit['dependencies']:
     if name=='JavaNativeFoundation': syms=audit['imports_by_library']['@rpath/JavaNativeFoundation']
     manifest.append({'library':mapping['libbitwig-jni.jnilib'].get(dep,dep),'symbols':[s[1:] for s in syms]})
 (APP/'native-imports.json').write_text(json.dumps(manifest))
-info=plistlib.loads((ROOT/'build/native-java/BitwigJavaProbe.app/Info.plist').read_bytes())
+info = java_probe_info()
 if args.embedded_engine: info['UIBackgroundModes']=['audio']
 info.update(UIStatusBarHidden=True,UIViewControllerBasedStatusBarAppearance=False,UIRequiresFullScreen=True,CFBundleDisplayName='Bitwig',CFBundleIdentifier='org.example.bitwigipad.nativehost',CFBundleExecutable='BitwigNativeHost',CFBundleName='Bitwig Native Host')
 if args.device:info.update(UIFileSharingEnabled=True,LSSupportsOpeningDocumentsInPlace=True,NSLocalNetworkUsageDescription='The embedded Java JIT helper connects to this iPad through its local developer tunnel.')

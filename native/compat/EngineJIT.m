@@ -1,9 +1,11 @@
-// LLVM 21.1.8 SectionMemoryManager adaptation for the copied Bitwig 6.1.4 engine.
+// LLVM 21.1.8 SectionMemoryManager adaptation for the supported Bitwig ARM64 engines.
 // LLVM emits/relocates in its own staging memory; mapSectionAddress assigns the
 // real RX addresses before relocation, and finalize copies into prepared aliases.
 #import <Foundation/Foundation.h>
 #include <sys/mman.h>
 #include <mach/mach.h>
+#include <mach-o/loader.h>
+#include <uuid/uuid.h>
 #include <libkern/OSCacheControl.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -129,13 +131,56 @@ bool BWPrepareEngineJIT(void) {
     if(((int(*)(void))a->rx)()!=43){report(@"rewritten execution mismatch",0);return false;}
     ready=true;report(@"execution and rewrite passed",0);return true;
 }
+typedef struct {
+    uuid_t uuid;
+    uintptr_t memoryManager, mcjit;
+    uintptr_t allocate, finalize, notify, map;
+} EngineABI;
+
+static const EngineABI engineABIs[] = {
+    // ARM64 6.1.4, LLVM 21.1.8
+    {{0xb7,0xf7,0x33,0xf9,0x83,0x1b,0x3a,0xf8,0xb5,0x89,0x59,0x6b,0x86,0x93,0xbe,0x9a},
+     0x3e26cc0, 0x3e26948, 0x3ef228, 0x3ef238, 0x3ef964, 0x3e6fd8},
+    // ARM64 6.1.7, LLVM 21.1.8
+    {{0x61,0x52,0xb2,0xae,0x4f,0x73,0x3e,0xfb,0xa7,0x0d,0x1d,0x82,0x43,0x42,0x2b,0xa4},
+     0x3e32cc0, 0x3e32948, 0x3ee510, 0x3ee520, 0x3eec4c, 0x3e62c0},
+};
+
+static const EngineABI *engineABI(const struct mach_header_64 *header) {
+    if (!header || header->magic != MH_MAGIC_64 || header->cputype != CPU_TYPE_ARM64)
+        return NULL;
+    const unsigned char *command = (const unsigned char *)(header + 1);
+    size_t left = header->sizeofcmds;
+    for (uint32_t i = 0; i < header->ncmds && left >= sizeof(struct load_command); i++) {
+        const struct load_command *load = (const struct load_command *)command;
+        if (load->cmdsize < sizeof(*load) || load->cmdsize > left) break;
+        if (load->cmd == LC_UUID && load->cmdsize == sizeof(struct uuid_command)) {
+            const struct uuid_command *imageUUID = (const struct uuid_command *)load;
+            for (size_t j = 0; j < sizeof(engineABIs) / sizeof(engineABIs[0]); j++)
+                if (uuid_compare(imageUUID->uuid, engineABIs[j].uuid) == 0)
+                    return &engineABIs[j];
+            break;
+        }
+        command += load->cmdsize;
+        left -= load->cmdsize;
+    }
+    return NULL;
+}
+
 bool BWInstallEngineMemoryManager(const void *header) {
-    uintptr_t base=(uintptr_t)header;
-    void **vtable=(void**)(base+0x3e26cc0);
-    void **mcjit=(void**)(base+0x3e26948);
-    // Validated LLVM21.1.8 vtable layout in the exact ARM64 Bitwig6.1.4 payload.
-    // All comparisons use the loaded image slide. No executable instructions change.
-    if(vtable[2]!=(void*)(base+0x3ef228)||vtable[10]!=(void*)(base+0x3ef238)||vtable[13]!=(void*)(base+0x3ef964)||mcjit[12]!=(void*)(base+0x3e6fd8)){
+    const EngineABI *abi = engineABI(header);
+    if (!abi) {
+        report(@"Unsupported ARM64 engine UUID", EINVAL);
+        return false;
+    }
+    uintptr_t base = (uintptr_t)header;
+    void **vtable = (void **)(base + abi->memoryManager);
+    void **mcjit = (void **)(base + abi->mcjit);
+    // Check the fixed-up callbacks in the loaded image before changing table data.
+    if (vtable[2] != (void *)(base + abi->allocate) ||
+        vtable[10] != (void *)(base + abi->finalize) ||
+        vtable[13] != (void *)(base + abi->notify) ||
+        mcjit[12] != (void *)(base + abi->map)) {
         report(@"LLVM memory manager ABI does not match adapted payload",EINVAL);return false;
     }
     originalAllocate=vtable[2];originalFinalize=vtable[10];originalNotify=vtable[13];mapSection=mcjit[12];

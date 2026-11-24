@@ -8,9 +8,7 @@ Bitwig Studio 6.1.4 has run on a physical iPad mini A17 Pro: the original interf
 
 The main resizable window follows the current iPad scene bounds. The app hides the status bar and extracts its icon from the user's own Bitwig installation at build time. Menus and dialogs retain their own window geometry.
 
-6.1.7 multitouch work has begun. A local comparison of the official 6.1.7 download against 6.1.4 found seven added native imports and 35 added touch-related strings, including `BWDirectTouchRecognizer`, `handleTouchPressedEvent`, `handleTouchUpdateEvent` and `handleTouchReleasedEvent`. The recognizer subclasses `NSGestureRecognizer` and consumes AppKit touch events. The current UIKit bridge still maps one finger to mouse input; simultaneous multitouch is not implemented yet.
-
-The immediate integration work is to provide the recognizer/touch-event compatibility layer, preserve each finger's identity and phase, and forward UIKit touches into the original Bitwig recognizer. The audio-engine binary also changed: its version-specific LLVM memory-manager addresses must be revalidated before replacing the installed 6.1.4 build. Do not mix a 6.1.7 frontend with the cached 6.1.4 engine.
+The host accepts a locally supplied ARM64 Bitwig Studio 6.1.7 bundle. Its original `BWDirectTouchRecognizer` receives UIKit direct contacts with their own identities, coordinates and phases, including cancellation. Indirect pointer input retains the mouse route. The legacy 6.1.4 bundle remains the default. Each engine uses an LLVM ABI profile checked against its loaded Mach-O UUID and original callback slots.
 
 A repeatable read-only comparison is available:
 
@@ -22,9 +20,9 @@ After building the device host and engine probe, compare both local ARM64 app bu
 
 ```sh
 python3 scripts/inventory-native-compat.py /path/to/6.1.4.app /path/to/6.1.7.app \
-  --frameworks build/native-host-tunnel/DerivedData/Build/Products/Debug-iphoneos/BitwigNativeHost.app/Frameworks \
-  --jni-mappings evidence/native-host-device-library-mappings.json \
-  --engine-mappings evidence/native-engine-device-adaptation.json \
+  --frameworks build/6.1.7/SOURCE_KEY/native-host-tunnel/DerivedData/Build/Products/Debug-iphoneos/BitwigNativeHost.app/Frameworks \
+  --jni-mappings evidence/6.1.7/SOURCE_KEY/native-host-device-library-mappings.json \
+  --engine-mappings evidence/6.1.7/SOURCE_KEY/native-engine-device-adaptation.json \
   --output evidence/native-compat.json
 ```
 
@@ -32,7 +30,7 @@ Add `--simulator <booted-device>` for system Objective-C method declarations, in
 
 The 6.1.4 window crash came from `BWWindow` calling the missing inherited frame constraint during a move. The same call also appears in its fullscreen-exit handler, and both sites are present in 6.1.7. The bridge constrains vertical placement to the iPad scene and preserves horizontal placement and the host's adaptive fullscreen policy. The simulator geometry test exercises that inherited method against the compiled bridge.
 
-The audit also found two missing superclass live-resize callbacks on `BWView`. The host resizes its UIKit scene through layout callbacks. The original desktop live-resize sequence has no established caller in the iPad host. The unresolved `CGFontCreateWithPlatformFont` import is in Cairo's legacy ATS font path. Its use in the supported host has not been observed. The 6.1.7 recognizer and key-state dependencies are part of the ongoing multitouch work.
+The audit also found two missing superclass live-resize callbacks on `BWView`. The host resizes its UIKit scene through layout callbacks. The original desktop live-resize sequence has no established caller in the iPad host. The unresolved `CGFontCreateWithPlatformFont` import is in Cairo's legacy ATS font path. Its use in the supported host has not been observed.
 
 The engine report records a null dereference in the original engine's render callback about 25 ms after the frontend aborted. Connection teardown is a hypothesis. Reproducing the callback fault with engine lifecycle evidence is required to establish its cause.
 
@@ -48,14 +46,28 @@ The current development setup uses macOS, Xcode with an iOS SDK, Python 3, Xcode
 
 Local dependencies under `vendor/` are described in THIRD_PARTY.md. This is a development snapshot, not a one-command installer: the iOS Java runtime, embedded helper dependencies, device pairing and signing must be prepared separately. Never commit a pairing file.
 
-The existing build sequence prepares the Java probe bundle metadata, runs `scripts/audit-native-port.py`, builds the audio engine using `scripts/build-native-engine-probe.py --device`, then builds the host:
+To build the 6.1.7 device host, point all three commands at the same local app:
 
 ```sh
+export BITWIG_APP="/path/to/Bitwig Studio 6.1.7.app"
+python3 scripts/audit-native-port.py
+python3 scripts/build-native-engine-probe.py --device
 python3 scripts/build-native-host.py --device --embedded-tunnel --embedded-engine
 ```
 
-Generated files belong under `build/` and diagnostics under `evidence/`, both excluded from Git. The icon is generated locally into the build asset catalog.
+The audit, engine probe, Java simulator probe and host also accept `--bitwig-app`. Omit both the flag and `BITWIG_APP` to use `/Applications/Bitwig Studio 6.1.4.app`. For a simulator host, run `scripts/build-native-java-probe.py` before building the host. Device builds use the local iOS Java runtime directly.
+
+Builds and diagnostics are isolated under `build/<version>/<source-key>/` and `evidence/<version>/<source-key>/`. The source key is derived from the resolved app path. The builder prints the output location. The host verifies its cached audit and engine adaptation against the selected binaries. Both output directories are excluded from Git. The icon is generated locally into the build asset catalog.
+
+For device input checks, launch the development host with `--native-touch-trace` to log recognizer attachment and accepted UIKit contact phases. The existing `tap-screen` tool accepts timed contact frames on a trusted device. Each frame includes every still-active contact and any releases, using normalized native digitizer coordinates:
+
+```sh
+tap-screen "$BITWIG_DEVICE_UDID" --frames \
+  '0:0,20000,40000,down;1,26000,40000,down' \
+  '700:0,20000,40000,up;1,26000,40000,down' \
+  '400:1,26000,40000,up'
+```
 
 ## Limitations
 
-Saving/exporting remain subject to Bitwig activation and the native save panel is not implemented. Audio input, external audio routes, third-party plug-ins, full hardware-keyboard handling and multitouch are incomplete or unqualified. This prototype does not claim exhaustive crash coverage or production readiness.
+Saving/exporting remain subject to Bitwig activation and the native save panel is not implemented. Audio input, external audio routes, third-party plug-ins, full hardware-keyboard handling and physical 6.1.7 multitouch are unqualified. This prototype does not claim exhaustive crash coverage or production readiness.
