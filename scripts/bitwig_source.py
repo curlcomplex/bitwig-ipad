@@ -41,9 +41,9 @@ class BitwigSource:
         return {'path': str(path), 'sha256': sha256(path)}
 
 
-def java_probe_info():
+def java_probe_info(identity):
     return dict(
-        CFBundleIdentifier='com.felixgodden.bitwigipad.javaprobe',
+        CFBundleIdentifier=identity.bundle('javaprobe'),
         CFBundleExecutable='BitwigJavaProbe', CFBundleName='Bitwig Java Probe',
         CFBundlePackageType='APPL', CFBundleVersion='1', CFBundleShortVersionString='0.1',
         MinimumOSVersion='17.0', UIDeviceFamily=[2], UILaunchScreen={},

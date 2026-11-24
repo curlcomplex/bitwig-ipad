@@ -1,3 +1,4 @@
+#import "LocalConfiguration.h"
 #import <Foundation/Foundation.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/AudioHardwareBase.h>
@@ -20,7 +21,7 @@ static NSLock *unitLock;
 static void prepare(void){static dispatch_once_t once;dispatch_once(&once,^{units=[NSMutableSet new];unitLock=[NSLock new];});}
 static BWOutput *proxy(AudioUnit unit){prepare();[unitLock lock];BOOL found=[units containsObject:[NSValue valueWithPointer:unit]];[unitLock unlock];return found?(BWOutput*)unit:NULL;}
 static void *symbol(const char *name){static void *handle;static dispatch_once_t once;dispatch_once(&once,^{handle=dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",RTLD_NOW);});return dlsym(handle,name);}
-static NSString *ringPath(void){NSURL *group=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.com.felixgodden.bitwigipad"];return [[group URLByAppendingPathComponent:@"BitwigUser/Audio/ring.bin"] path];}
+static NSString *ringPath(void){NSURL *group=BWSharedContainerURL();return [[group URLByAppendingPathComponent:@"BitwigUser/Audio/ring.bin"] path];}
 static void *produce(void *context){
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
     BWOutput *unit=context;BWAudioRing *r=unit->ring;UInt32 frames=MAX(32,MIN(r->bufferFrames,4096)),channels=unit->format.mChannelsPerFrame;

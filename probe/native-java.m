@@ -1,3 +1,4 @@
+#import "../native/compat/LocalConfiguration.h"
 #import <UIKit/UIKit.h>
 #import "../native/compat/Trace.h"
 #include <dlfcn.h>
@@ -87,7 +88,7 @@ static void runJava(void) {
     save();
     NSString *userHome=documents;
 #ifdef EMBEDDED_ENGINE
-    NSURL *shared=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.com.felixgodden.bitwigipad"];
+    NSURL *shared=BWSharedContainerURL();
     if(!shared){report[@"phase"]=@"shared engine container unavailable";save();return;}
     userHome=[[shared URLByAppendingPathComponent:@"BitwigUser"] path];
     NSError *sharedError=nil;

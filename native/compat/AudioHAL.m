@@ -1,3 +1,4 @@
+#import "LocalConfiguration.h"
 #import <Foundation/Foundation.h>
 #import <AVFAudio/AVFAudio.h>
 #include <AudioToolbox/AudioToolbox.h>
@@ -31,7 +32,7 @@ static BWAudioRing *sharedAudio;
 @end
 static BWAudioRoute *session(void){
     static BWAudioRoute *audio;
-    if(!audio){NSURL *group=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.com.felixgodden.bitwigipad"];NSData *data=[NSData dataWithContentsOfURL:[group URLByAppendingPathComponent:@"BitwigUser/Audio/route.json"]];NSDictionary *info=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;if(info){audio=[BWAudioRoute new];audio.info=info;fprintf(stdout,"[native audio] foreground route=%s rate=%.0f channels=%ld\n",audio.portName.UTF8String,audio.sampleRate,(long)audio.outputNumberOfChannels);}}
+    if(!audio){NSURL *group=BWSharedContainerURL();NSData *data=[NSData dataWithContentsOfURL:[group URLByAppendingPathComponent:@"BitwigUser/Audio/route.json"]];NSDictionary *info=data?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;if(info){audio=[BWAudioRoute new];audio.info=info;fprintf(stdout,"[native audio] foreground route=%s rate=%.0f channels=%ld\n",audio.portName.UTF8String,audio.sampleRate,(long)audio.outputNumberOfChannels);}}
     return audio;
 }
 static NSData *bytes(const void *value,NSUInteger size){return [NSData dataWithBytes:value length:size];}
@@ -72,7 +73,7 @@ static NSData *property(AudioObjectID object,const AudioObjectPropertyAddress *a
         if(selector==kAudioDevicePropertyModelUID)return string(@"iPadOS.currentAudioRoute",retain);
         if(selector==kAudioDevicePropertyDeviceIsAlive)return u32(available);
         if(selector==kAudioDevicePropertyDeviceIsRunning||selector=='gone'){
-            if(!sharedAudio){NSURL *group=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.com.felixgodden.bitwigipad"];int fd=open([[group URLByAppendingPathComponent:@"BitwigUser/Audio/ring.bin"] fileSystemRepresentation],O_RDONLY);if(fd>=0){void *p=mmap(NULL,sizeof(BWAudioRing),PROT_READ,MAP_SHARED,fd,0);close(fd);if(p!=MAP_FAILED)sharedAudio=p;}}
+            if(!sharedAudio){NSURL *group=BWSharedContainerURL();int fd=open([[group URLByAppendingPathComponent:@"BitwigUser/Audio/ring.bin"] fileSystemRepresentation],O_RDONLY);if(fd>=0){void *p=mmap(NULL,sizeof(BWAudioRing),PROT_READ,MAP_SHARED,fd,0);close(fd);if(p!=MAP_FAILED)sharedAudio=p;}}
             return u32(sharedAudio?atomic_load(&sharedAudio->actualRunning):0);
         }
         if(selector==kAudioDevicePropertyDeviceCanBeDefaultDevice||selector==kAudioDevicePropertyDeviceCanBeDefaultSystemDevice)return u32(!input&&available);

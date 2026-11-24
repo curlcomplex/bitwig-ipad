@@ -1,3 +1,4 @@
+#import "LocalConfiguration.h"
 #import <Foundation/Foundation.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -13,7 +14,7 @@
 // Both binaries import this bridge, preserving open/exclusive/unlink semantics.
 static NSString *sharedPath(const char *name) {
     if(!name||!name[0]){errno=EINVAL;return nil;}
-    NSURL *group=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.com.felixgodden.bitwigipad"];
+    NSURL *group=BWSharedContainerURL();
     if(!group){errno=EACCES;return nil;}
     NSURL *directory=[group URLByAppendingPathComponent:@"BitwigUser/Posix/SharedMemory" isDirectory:YES];
     NSError *error=nil;
@@ -46,7 +47,9 @@ static NSString *semaphoreName(const char *name) {
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(name,(CC_LONG)strlen(name),digest);
     NSString *key=[[NSData dataWithBytes:digest length:12] base64EncodedStringWithOptions:0];
     key=[[key stringByReplacingOccurrencesOfString:@"/" withString:@"_"] stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
-    return [@"group.fg.bw/" stringByAppendingString:key];
+    NSString *group=BWIPCGroupIdentifier();
+    if(!group.length){errno=EACCES;return nil;}
+    return [NSString stringWithFormat:@"%@/%@",group,key];
 }
 sem_t *sem_open(const char *name,int flags,...) {
     mode_t mode=0;unsigned value=0;

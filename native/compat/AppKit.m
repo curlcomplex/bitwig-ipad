@@ -1,3 +1,4 @@
+#import "LocalConfiguration.h"
 // AppKit ABI bridge for Bitwig's native window classes. Implemented operations
 // delegate to UIKit. Unimplemented selectors retain NSObject's normal exception;
 // they must be implemented from observed use, never swallowed as successful calls.
@@ -1394,7 +1395,7 @@ void BWUIKitPollTestInput(void) {
 - (void)documentPicker:(UIDocumentPickerViewController*)controller didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
     NSLog(@"Native file picker selected count=%lu",(unsigned long)urls.count);
     NSMutableArray *imported=[NSMutableArray new];NSError *error=nil;
-    NSURL *group=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.com.felixgodden.bitwigipad"];
+    NSURL *group=BWSharedContainerURL();
     if(!group)group=[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *destination=[[group URLByAppendingPathComponent:@"BitwigUser/Imports"] URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
     [NSFileManager.defaultManager createDirectoryAtURL:destination withIntermediateDirectories:YES attributes:nil error:&error];

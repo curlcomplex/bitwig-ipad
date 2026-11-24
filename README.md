@@ -72,7 +72,9 @@ This repository contains the compatibility code, host, development tools and tar
 
 The integrated tunnel uses code based on LocalDevVPN by Stossy11 and the SideStore Team; see THIRD_PARTY.md and its retained licence.
 
-The current development setup uses macOS, Xcode with an iOS SDK, Python 3, XcodeGen, a Java development kit for JNI headers, Apple development signing, and a trusted iPad with Developer Mode enabled. The scripts currently assume Homebrew paths and project-specific signing/bundle identifiers; adjust those for your account.
+The current development setup uses macOS, Xcode with an iOS SDK, Python 3.10 or newer, XcodeGen for device builds, and a JDK for JNI headers. Set `BITWIG_JDK_HOME` if the JDK found through `JAVA_HOME` or macOS is unsuitable. The Simulator uses a neutral bundle identifier by default. Select a Simulator with `--simulator` or `BITWIG_SIMULATOR_ID` when using `--run` or running UI tests.
+
+Device builds require `BITWIG_BUNDLE_PREFIX` and `BITWIG_DEVELOPMENT_TEAM`, and the embedded engine also requires `BITWIG_APP_GROUP` and `BITWIG_IPC_GROUP`. The IPC group is limited to 14 characters, including `group.`, to leave room for the semaphore name. Keep these values in your local environment. To update an existing install, supply the same prefix and App Groups as the existing build.
 
 Local dependencies under `vendor/` are described in THIRD_PARTY.md. This is a development snapshot, not a one-command installer: the iOS Java runtime, embedded helper dependencies, device pairing and signing must be prepared separately. Never commit a pairing file.
 

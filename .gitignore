@@ -31,3 +31,4 @@ __pycache__/
 !/scripts/inventory-objc-runtime.m
 !/scripts/bitwig_source.py
 !/scripts/compat_discovery.py
+!/scripts/local_config.py

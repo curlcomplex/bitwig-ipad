@@ -7,6 +7,8 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from local_config import build_identity, selected_simulator, simulator_argument
+
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--continue-demo', action='store_true')
@@ -22,32 +24,34 @@ parser.add_argument('--clear-text', action='store_true')
 parser.add_argument('--window-drag', action='store_true')
 parser.add_argument('--device-drag', action='store_true')
 parser.add_argument('--cancel-drag', action='store_true')
-parser.add_argument('--simulator', default=os.environ.get('BITWIG_SIMULATOR_ID'),
-                    help='Booted iPad simulator identifier, or BITWIG_SIMULATOR_ID')
+simulator_argument(parser)
 parser.add_argument('--compat-workflow', choices=['file-picker'])
 args = parser.parse_args()
 if args.compat_workflow and args.device:
     parser.error('The compatibility workflow coordinates are for the landscape iPad mini simulator')
-if not args.device and not args.simulator:
-    listing = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'booted', '-j']))
-    matches = [device['udid'] for devices in listing['devices'].values() for device in devices
-               if device['name'] == 'Bitwig Groundwork']
-    if len(matches) != 1:
-        parser.error('Set --simulator to the booted iPad mini simulator')
-    args.simulator = matches[0]
+device_id = os.getenv('BITWIG_DEVICE_ID')
+if args.device and not device_id:
+    parser.error('Device UI tests require BITWIG_DEVICE_ID')
+if not args.device:
+    args.simulator = selected_simulator(parser, args.simulator)
+identity = build_identity(parser, args.device)
 build = root / 'build/native-ui-test'
 build.mkdir(parents=True, exist_ok=True)
+(root / 'evidence').mkdir(exist_ok=True)
+test_config = build / 'TestBuildConfiguration.swift'
+test_config.write_text('enum TestBuildConfiguration { static let hostBundleIdentifier = '
+                       + json.dumps(identity.bundle('nativehost')) + ' }\n')
 spec = {
     'name': 'NativeHostUI',
     'targets': {'NativeHostUITests': {
         'type': 'bundle.ui-testing', 'platform': 'iOS', 'deploymentTarget': '26.0',
-        'sources': [{'path': str(root / 'native/NativeHostUITests.swift')}],
+        'sources': [{'path': str(root / 'native/NativeHostUITests.swift')}, {'path': str(test_config)}],
         'settings': {'base': {
-            'PRODUCT_BUNDLE_IDENTIFIER': 'com.felixgodden.bitwigipad.uitests',
+            'PRODUCT_BUNDLE_IDENTIFIER': identity.bundle('uitests'),
             'GENERATE_INFOPLIST_FILE': 'YES', 'SWIFT_VERSION': '5.0',
             'TARGETED_DEVICE_FAMILY': '2',
             'CODE_SIGNING_ALLOWED': 'YES' if args.device else 'NO',
-            'DEVELOPMENT_TEAM': '7L4A5VNHW2', 'CODE_SIGN_STYLE': 'Automatic'
+            **({'DEVELOPMENT_TEAM': identity.team, 'CODE_SIGN_STYLE': 'Automatic'} if args.device else {})
         }}
     }},
     'schemes': {'NativeHostUI': {
@@ -59,7 +63,7 @@ spec = {
 subprocess.run(['xcodegen', 'generate', '--spec', str(build / 'project.json')], check=True)
 subprocess.run(['xcodebuild', '-project', str(build / 'NativeHostUI.xcodeproj'),
                 '-scheme', 'NativeHostUI', '-destination',
-                (f"platform=iOS,id={os.environ['BITWIG_DEVICE_ID']}" if args.device else
+                (f"platform=iOS,id={device_id}" if args.device else
                  f'platform=iOS Simulator,id={args.simulator}'),
                 '-derivedDataPath', str(build / 'DerivedData'), '-jobs', '4',
                 '-allowProvisioningUpdates',

@@ -9,14 +9,20 @@ import shutil
 import zipfile
 from pathlib import Path
 from bitwig_source import BitwigSource, ENGINE, JNI, ROOT, java_probe_info, sha256
+from local_config import build_identity, jni_include_paths, selected_simulator, simulator_argument
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--run',action='store_true')
+parser.add_argument('--run',action='store_true',help='Install and launch the built Simulator host')
+simulator_argument(parser)
 parser.add_argument('--device',action='store_true',help='Build/sign the native iPad host with its embedded JIT helper')
 parser.add_argument('--embedded-tunnel',action='store_true',help='Include the local developer tunnel in the iPad app; configuration requires its setup button')
 parser.add_argument('--embedded-engine',action='store_true',help='Include the adapted audio engine in its own native extension process')
 bitwig=BitwigSource(parser);args=bitwig.args
 if args.embedded_tunnel and not args.device: parser.error('--embedded-tunnel requires --device')
 if args.embedded_engine and not args.device: parser.error('--embedded-engine requires --device')
+if args.run and args.device: parser.error('--run only applies to the Simulator host')
+simulator = selected_simulator(parser, args.simulator) if args.run else None
+identity = build_identity(parser, args.device, args.embedded_engine)
+jni_headers = jni_include_paths(parser)
 SOURCE = bitwig.contents
 build_name = 'native-host-tunnel' if args.embedded_tunnel else 'native-host-device' if args.device else 'native-host'
 if args.embedded_tunnel and not args.embedded_engine: build_name += '-no-engine'
@@ -127,9 +133,10 @@ for dep in audit['dependencies']:
     if name=='JavaNativeFoundation': syms=audit['imports_by_library']['@rpath/JavaNativeFoundation']
     manifest.append({'library':mapping['libbitwig-jni.jnilib'].get(dep,dep),'symbols':[s[1:] for s in syms]})
 (APP/'native-imports.json').write_text(json.dumps(manifest))
-info = java_probe_info()
+info = java_probe_info(identity)
+info.update(identity.group_info())
 if args.embedded_engine: info['UIBackgroundModes']=['audio']
-info.update(UIStatusBarHidden=True,UIViewControllerBasedStatusBarAppearance=False,UIRequiresFullScreen=True,CFBundleDisplayName='Bitwig',CFBundleIdentifier='com.felixgodden.bitwigipad.nativehost',CFBundleExecutable='BitwigNativeHost',CFBundleName='Bitwig Native Host')
+info.update(UIStatusBarHidden=True,UIViewControllerBasedStatusBarAppearance=False,UIRequiresFullScreen=True,CFBundleDisplayName='Bitwig',CFBundleIdentifier=identity.bundle('nativehost'),CFBundleExecutable='BitwigNativeHost',CFBundleName='Bitwig Native Host')
 info.update(UIFileSharingEnabled=True,LSSupportsOpeningDocumentsInPlace=True)
 if args.device:info.update(NSLocalNetworkUsageDescription='The embedded Java JIT helper connects to this iPad through its local developer tunnel.')
 # Extract the icon from the user's licensed local installation, never distribute it.
@@ -161,10 +168,10 @@ if args.device:
     (BUILD/'Helper-Info.plist').write_bytes(plistlib.dumps(helper_info))
     entitlements={'get-task-allow':True,'com.apple.developer.kernel.increased-memory-limit':True,'com.apple.developer.kernel.extended-virtual-addressing':True}
     if args.embedded_tunnel: entitlements['com.apple.developer.networking.networkextension']=['packet-tunnel-provider']
-    if args.embedded_engine:entitlements['com.apple.security.application-groups']=['group.com.felixgodden.bitwigipad','group.fg.bw']
+    if identity.app_group:entitlements.update(identity.group_entitlements())
     (BUILD/'Host.entitlements').write_bytes(plistlib.dumps(entitlements))
     framework=ROOT/'vendor/Husk/src/app/Frameworks/StikJIT.xcframework'
-    common={'DEVELOPMENT_TEAM':'7L4A5VNHW2','CODE_SIGN_STYLE':'Automatic','SWIFT_VERSION':'5.0','TARGETED_DEVICE_FAMILY':'2'}
+    common={'DEVELOPMENT_TEAM':identity.team,'CODE_SIGN_STYLE':'Automatic','SWIFT_VERSION':'5.0','TARGETED_DEVICE_FAMILY':'2'}
     resources=[{'path':str(APP/name),'type':'folder','buildPhase':'resources'} for name in ['jre','installation','Frameworks']]
     resources += [{'path':str(BUILD/'Assets.xcassets'),'buildPhase':'resources'}]
     resources += [{'path':str(APP/name),'buildPhase':'resources'} for name in ['bitwig.jar','libs.jar','native-imports.json']]
@@ -182,7 +189,7 @@ PYSIGN'''
       'BitwigNativeHost':{'type':'application','platform':'iOS','deploymentTarget':'26.0',
         'sources':[{'path':str(ROOT/'probe/native-java.m')},{'path':str(ROOT/'native/NativeJITCoordinator.swift')},{'path':str(generated/'JITBuiltIn.swift')},{'path':str(generated/'BitwigJITMessages.swift')},*resources,{'path':str(ROOT/'native/native-java-jit.js'),'buildPhase':'resources'}],
         'dependencies':[{'target':'BitwigJITHelper','embed':True}],
-        'settings':{'base':{**common,'ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier'],'INFOPLIST_FILE':str(APP/'Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Host.entitlements'),'GCC_PREPROCESSOR_DEFINITIONS':['$(inherited)','FULL_BITWIG_HOST=1'],'HEADER_SEARCH_PATHS':'/opt/homebrew/opt/openjdk/include','OTHER_LDFLAGS':['$(inherited)','-Wl,-export_dynamic'],'CLANG_ENABLE_OBJC_ARC':'YES'}},
+        'settings':{'base':{**common,'ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier'],'INFOPLIST_FILE':str(APP/'Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Host.entitlements'),'GCC_PREPROCESSOR_DEFINITIONS':['$(inherited)','FULL_BITWIG_HOST=1'],'HEADER_SEARCH_PATHS':jni_headers,'OTHER_LDFLAGS':['$(inherited)','-Wl,-export_dynamic'],'CLANG_ENABLE_OBJC_ARC':'YES'}},
         'postBuildScripts':[{'name':'Sign native Java and adapted Bitwig libraries','script':sign_script,'basedOnDependencyAnalysis':False}]},
       'BitwigJITHelper':{'type':'app-extension','platform':'iOS','deploymentTarget':'26.0',
         'sources':[{'path':str(generated/name)} for name in ['BitwigJITHelper.swift','BitwigJITMessages.swift','RSDPortScanner.swift','RSDPortResolver.swift']],
@@ -201,8 +208,9 @@ PYSIGN'''
         engine_info['CFBundleDisplayName']='Bitwig Audio Engine'
         engine_info.pop('NSBonjourServices',None)
         engine_info['NSLocalNetworkUsageDescription']='The audio engine communicates with the Bitwig interface on this iPad.'
+        engine_info.update(identity.group_info())
         (BUILD/'Engine-Info.plist').write_bytes(plistlib.dumps(engine_info))
-        (BUILD/'Engine.entitlements').write_bytes(plistlib.dumps({'com.apple.security.application-groups':['group.com.felixgodden.bitwigipad','group.fg.bw']}))
+        (BUILD/'Engine.entitlements').write_bytes(plistlib.dumps(identity.group_entitlements()))
         project['targets']['BitwigEngine']={'type':'app-extension','platform':'iOS','deploymentTarget':'26.0',
             'sources':[{'path':str(ROOT/'native/NativeEngineExtension.m')}],
             'settings':{'base':{**common,'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier']+'.engine',
@@ -236,10 +244,9 @@ PYSIGN'''
     run('xcodebuild','-project',BUILD/'BitwigNativeHost.xcodeproj','-scheme','BitwigNativeHost','-configuration','Debug','-sdk','iphoneos','-destination','generic/platform=iOS','-derivedDataPath',BUILD/'DerivedData','-jobs','4','-allowProvisioningUpdates','build')
     print(BUILD/'DerivedData/Build/Products/Debug-iphoneos/BitwigNativeHost.app')
     raise SystemExit(0)
-run(*CC,'-fobjc-arc','-DFULL_BITWIG_HOST','-I/opt/homebrew/opt/openjdk/include','-framework','UIKit','-framework','Foundation','-Wl,-rpath,@executable_path/Frameworks',ROOT/'probe/native-java.m','-o',APP/'BitwigNativeHost')
+run(*CC,'-fobjc-arc','-DFULL_BITWIG_HOST',*[f'-I{path}' for path in jni_headers],'-framework','UIKit','-framework','Foundation','-Wl,-rpath,@executable_path/Frameworks',ROOT/'probe/native-java.m','-o',APP/'BitwigNativeHost')
 run('codesign','--force','--sign','-',APP)
 if args.run:
-    udid=json.loads((ROOT/'evidence/simulator.json').read_text())['udid']
-    subprocess.run(['xcrun','simctl','terminate',udid,info['CFBundleIdentifier']],capture_output=True)
-    run('xcrun','simctl','install',udid,APP)
-    run('xcrun','simctl','launch',udid,info['CFBundleIdentifier'])
+    subprocess.run(['xcrun','simctl','terminate',simulator,info['CFBundleIdentifier']],capture_output=True)
+    run('xcrun','simctl','install',simulator,APP)
+    run('xcrun','simctl','launch',simulator,info['CFBundleIdentifier'])
