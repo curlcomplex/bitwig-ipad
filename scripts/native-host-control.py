@@ -8,6 +8,8 @@ import subprocess
 import time
 import uuid
 
+from local_config import bundle_prefix
+
 root=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('action',choices=['inspect','click','engine'])
@@ -22,10 +24,10 @@ parser.add_argument('--hold',type=float,default=0.1)
 args=parser.parse_args()
 if not args.device_id and not args.simulator:
     parser.error("Set --simulator, --device-id or BITWIG_DEVICE_ID")
+bundle = bundle_prefix(parser, explicit=not args.simulator) + '.nativehost'
 command={key: getattr(args, key) for key in ('action', 'title', 'x', 'y', 'count', 'hold', 'port')}
 command['id']=str(uuid.uuid4())
 if args.simulator:
-    bundle = 'org.example.bitwigipad.nativehost'
     container = subprocess.check_output(['xcrun', 'simctl', 'get_app_container', args.simulator, bundle, 'data'],
                                         text=True).strip()
     documents = Path(container) / 'Documents'
@@ -43,12 +45,13 @@ if args.simulator:
             print(json.dumps(result, indent=2))
             raise SystemExit(0 if result.get('ok') else 1)
     raise SystemExit('No matching response; launch the host with --native-ui-automation')
+(root/'evidence').mkdir(exist_ok=True)
 source=root/'evidence/native-ui-command.json'
 result_path=root/'evidence/device-native-ui-result.json'
 source.write_text(json.dumps(command)+'\n')
 base=['xcrun','devicectl','device','copy']
 options=['--device',args.device_id,'--timeout','10',
-         '--domain-type','appDataContainer','--domain-identifier','org.example.bitwigipad.nativehost']
+         '--domain-type','appDataContainer','--domain-identifier',bundle]
 # The host consumes the command immediately; devicectl can report a missing
 # final file node after a successful upload. The matching acknowledgement is
 # authoritative, and prevents resending an already executed click.

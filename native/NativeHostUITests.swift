@@ -2,7 +2,7 @@ import XCTest
 
 final class NativeHostUITests: XCTestCase {
     private func compatibilityHost() -> XCUIApplication {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
         XCTAssertEqual(app.frame.size, CGSize(width: 1133, height: 744),
@@ -41,7 +41,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testFullScreenRotation() {
-        let app=XCUIApplication(bundleIdentifier:"org.example.bitwigipad.nativehost")
+        let app=XCUIApplication(bundleIdentifier:TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         for orientation in [UIDeviceOrientation.portrait, .landscapeLeft] {
             XCUIDevice.shared.orientation=orientation
@@ -55,7 +55,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testDragNativeDevice() {
-        let app=XCUIApplication(bundleIdentifier:"org.example.bitwigipad.nativehost")
+        let app=XCUIApplication(bundleIdentifier:TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         let start=app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:195-app.frame.minX,dy:310-app.frame.minY))
         let end=app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:600-app.frame.minX,dy:300-app.frame.minY))
@@ -64,7 +64,7 @@ final class NativeHostUITests: XCTestCase {
         XCTAssertTrue(app.wait(for:.runningForeground,timeout:5))
     }
     func testCancelNativeDeviceDrag() {
-        let app=XCUIApplication(bundleIdentifier:"org.example.bitwigipad.nativehost")
+        let app=XCUIApplication(bundleIdentifier:TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         let start=app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:195-app.frame.minX,dy:310-app.frame.minY))
         let end=app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:50-app.frame.minX,dy:600-app.frame.minY))
@@ -73,7 +73,7 @@ final class NativeHostUITests: XCTestCase {
         XCTAssertTrue(app.wait(for:.runningForeground,timeout:5))
     }
     func testDragWelcomeWindow() {
-        let app=XCUIApplication(bundleIdentifier:"org.example.bitwigipad.nativehost")
+        let app=XCUIApplication(bundleIdentifier:TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         let start=app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:500-app.frame.minX,dy:104-app.frame.minY))
         let end=app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:520-app.frame.minX,dy:124-app.frame.minY))
@@ -82,7 +82,7 @@ final class NativeHostUITests: XCTestCase {
         XCTAssertTrue(app.exists)
     }
     func testClearNativeText() {
-        let app=XCUIApplication(bundleIdentifier:"org.example.bitwigipad.nativehost")
+        let app=XCUIApplication(bundleIdentifier:TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         app.coordinate(withNormalizedOffset:.zero).withOffset(CGVector(dx:700-app.frame.minX,dy:255-app.frame.minY)).tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout:5))
@@ -96,7 +96,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testNativeFileImport() {
-        let app=XCUIApplication(bundleIdentifier:"org.example.bitwigipad.nativehost")
+        let app=XCUIApplication(bundleIdentifier:TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         let location=app.staticTexts["On My iPad"].firstMatch
         XCTAssertTrue(location.waitForExistence(timeout:10));location.tap()
@@ -118,7 +118,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testNativeTextInput() {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
         let frame=app.frame
@@ -132,7 +132,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testChooseTabletProfile() {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
         let frame = app.frame
@@ -149,7 +149,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testResumeNativePolySynth() {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
         XCUIDevice.shared.press(.home)
@@ -177,7 +177,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testPlayNativePolySynth() {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
         // Tablet profile C3 note pad, observed in assessment-synth-loaded.png.
@@ -191,7 +191,7 @@ final class NativeHostUITests: XCTestCase {
         XCTAssertTrue(app.exists, "Native host terminated during the piano-key touch")
     }
     func testCaptureNativeHost() {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
         let capture = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
@@ -201,7 +201,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testContinueDemoMode() {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
         // Continue button observed in native-host-demo-tap.png.
@@ -218,7 +218,7 @@ final class NativeHostUITests: XCTestCase {
     }
 
     func testEnterDemoMode() {
-        let app = XCUIApplication(bundleIdentifier: "org.example.bitwigipad.nativehost")
+        let app = XCUIApplication(bundleIdentifier: TestBuildConfiguration.hostBundleIdentifier)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
         let before = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
