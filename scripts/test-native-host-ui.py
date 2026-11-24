@@ -22,7 +22,19 @@ parser.add_argument('--clear-text', action='store_true')
 parser.add_argument('--window-drag', action='store_true')
 parser.add_argument('--device-drag', action='store_true')
 parser.add_argument('--cancel-drag', action='store_true')
+parser.add_argument('--simulator', default=os.environ.get('BITWIG_SIMULATOR_ID'),
+                    help='Booted iPad simulator identifier, or BITWIG_SIMULATOR_ID')
+parser.add_argument('--compat-workflow', choices=['file-picker'])
 args = parser.parse_args()
+if args.compat_workflow and args.device:
+    parser.error('The compatibility workflow coordinates are for the landscape iPad mini simulator')
+if not args.device and not args.simulator:
+    listing = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'booted', '-j']))
+    matches = [device['udid'] for devices in listing['devices'].values() for device in devices
+               if device['name'] == 'Bitwig Groundwork']
+    if len(matches) != 1:
+        parser.error('Set --simulator to the booted iPad mini simulator')
+    args.simulator = matches[0]
 build = root / 'build/native-ui-test'
 build.mkdir(parents=True, exist_ok=True)
 spec = {
@@ -48,11 +60,12 @@ subprocess.run(['xcodegen', 'generate', '--spec', str(build / 'project.json')], 
 subprocess.run(['xcodebuild', '-project', str(build / 'NativeHostUI.xcodeproj'),
                 '-scheme', 'NativeHostUI', '-destination',
                 (f"platform=iOS,id={os.environ['BITWIG_DEVICE_ID']}" if args.device else
-                 'platform=iOS Simulator,id=YOUR_SIMULATOR_ID'),
+                 f'platform=iOS Simulator,id={args.simulator}'),
                 '-derivedDataPath', str(build / 'DerivedData'), '-jobs', '4',
                 '-allowProvisioningUpdates',
                 '-only-testing:NativeHostUITests/NativeHostUITests/' +
-                ('testFullScreenRotation' if args.fullscreen else
+                ('testCompatibilityFilePickerCancellation' if args.compat_workflow == 'file-picker' else
+                 'testFullScreenRotation' if args.fullscreen else
                  'testCancelNativeDeviceDrag' if args.cancel_drag else
                  'testDragNativeDevice' if args.device_drag else
                  'testDragWelcomeWindow' if args.window_drag else

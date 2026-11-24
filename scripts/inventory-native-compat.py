@@ -441,6 +441,8 @@ def main():
     parser.add_argument('--frameworks', type=Path, required=True, help='Built device host Frameworks directory')
     parser.add_argument('--jni-mappings', type=Path, required=True, help='native-host-device-library-mappings.json')
     parser.add_argument('--engine-mappings', type=Path, required=True, help='native-engine-device-adaptation.json')
+    parser.add_argument('--profile-version', choices=['6.1.4', '6.1.7'],
+                        help='Version of the one bridge build and dependency mapping profile supplied')
     parser.add_argument('--simulator', help='Booted ARM64 iOS Simulator identifier for optional system method evidence')
     parser.add_argument('--runtime-version', choices=['6.1.4', '6.1.7'])
     parser.add_argument('--jvm-trace', type=Path, action='append', default=[],
@@ -488,6 +490,9 @@ def run_inventory(args, apps, scratch, bridge_classes, bridge_methods, mappings,
     report = {
         'scope': 'Mach-O ARM64 imports, exports, Objective-C and direct lookup instructions are static evidence against the supplied bridges. Mapping is projected from original dependency paths. Name or export evidence does not establish ABI, active loading, or supported behavior. Indirect sends, register resolution with control-flow joins, dynamic lookups and forwarding are incomplete.',
         'system_methods': 'ARM64 iOS Simulator runtime. Device availability and ABI compatibility require separate verification.' if args.simulator else 'System runtime method lookup disabled.',
+        'mapping_profile': {'build_version': args.profile_version or 'unspecified',
+                            'applied_to': sorted(apps),
+                            'replacement_runtime_exports': 'not inspected'},
         'bridge_classes': {name: {'superclass': parent, 'methods': sorted(bridge_methods.get(name, set()))}
                            for name, parent in bridge_classes.items()},
         'versions': {},
@@ -515,7 +520,7 @@ def run_inventory(args, apps, scratch, bridge_classes, bridge_methods, mappings,
             record['status'] = 'arm64_inspected'
             for symbol in scanned[name]['jni_exports']:
                 bindings[symbol].add(relative)
-        match_bindings(declarations, bindings)
+        match_bindings(declarations, bindings, {row['path']: row['role'] for row in records})
         report['versions'][version] = scanned
         report['discovery'][version] = {'images': records, 'denominators': counters,
                                         'uninspected': uninspected, 'jni_declarations': declarations}
