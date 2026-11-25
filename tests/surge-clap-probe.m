@@ -82,6 +82,21 @@ bool probe_editor(const clap_plugin_t *plugin) {
     height = 510;
     if (!gui->can_resize(plugin) || !gui->adjust_size(plugin, &width, &height) || !gui->set_size(plugin, width, height) ||
         !CGSizeEqualToSize(editor.bounds.size, CGSizeMake(width, height))) return false;
+#ifdef CHOW_EDITOR
+    [editor layoutIfNeeded];
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+    // Decline the plug-in's optional update prompt before exercising Input Gain.
+    if (!pointer(deliver, editor, CGPointMake(460, 286), CGPointZero, 1) ||
+        !pointer(deliver, editor, CGPointMake(460, 286), CGPointZero, 2)) return false;
+    double gain = parameter(plugin, params, "Input Gain");
+    if (!pointer(deliver, editor, CGPointMake(114, 199), CGPointZero, 1)) return false;
+    for (int step = 1; step <= 4; step++)
+        if (!pointer(deliver, editor, CGPointMake(114, 199 - 7 * step), CGPointMake(0, -7), 6)) return false;
+    if (!pointer(deliver, editor, CGPointMake(114, 171), CGPointZero, 2)) return false;
+    params->flush(plugin, &input, &output);
+    double changedGain = parameter(plugin, params, "Input Gain");
+    if (!(changedGain - gain > 0.05)) return false;
+#endif
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
     format.scale = 1;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:editor.bounds.size format:format];
@@ -90,7 +105,8 @@ bool probe_editor(const clap_plugin_t *plugin) {
     gui->destroy(plugin);
     if (parent.subviews.count || png.length < 10000) return false;
 #ifdef CHOW_EDITOR
-    fprintf(stderr, "CHOW_EDITOR_PASS resized to %ux%u, rendered %zu bytes\n", width, height, png.length);
+    fprintf(stderr, "CHOW_EDITOR_PASS Input Gain %.7f→%.7f, resized to %ux%u, rendered %zu bytes\n",
+            gain, changedGain, width, height, png.length);
 #else
     fprintf(stderr, "SURGE_EDITOR_PASS scene %.7f→%.7f cutoff %.7f→%.7f, resized to %ux%u, rendered %zu bytes\n",
             initialScene, switchedScene, initialCutoff, changedCutoff, width, height, png.length);
