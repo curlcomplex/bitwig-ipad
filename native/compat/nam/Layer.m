@@ -6,6 +6,13 @@
 
 static char metalLayerKey;
 extern void BWPrepareNAMMetalLayer(CAMetalLayer *layer);
+extern void BWDispatchNAMRender(UIView *view, SEL selector, IMP original);
+static IMP originalRender;
+
+static void render(UIView *view, SEL selector) {
+    BWDispatchNAMRender(view, selector, originalRender);
+}
+
 
 static CALayer *backingLayer(id view) {
     IMP getter = class_getMethodImplementation(UIView.class, @selector(layer));
@@ -76,4 +83,9 @@ void BWPrepareNAMView(UIView *view) {
     class_addMethod(cls, @selector(addToolTipRect:owner:userData:), (IMP)addToolTip,
                     "q@:{CGRect={CGPoint=dd}{CGSize=dd}}@^v");
     class_addMethod(cls, @selector(removeAllToolTips), (IMP)removeAllToolTips, "v@:");
+    Method method = class_getInstanceMethod(cls, @selector(render));
+    if (method && !originalRender) {
+        originalRender = method_getImplementation(method);
+        method_setImplementation(method, (IMP)render);
+    }
 }

@@ -82,7 +82,7 @@ Pass `--ott-vst3 "/path/to/OTT.vst3"` to the build with `--device`, `--embedded-
 
 ## Experimental Neural Amp Modeler VST3
 
-Pass `--nam-vst3 "/path/to/NeuralAmpModeler.vst3"` with `--device` and `--embedded-engine` to include the supported local Neural Amp Modeler 0.7.13 release. Choose **with Bitwig** in Bitwig Settings → Plug-ins. The build adapts the original ARM64 plug-in and compiles its matching upstream MetalNanoVG shader for iPadOS using the Xcode Metal toolchain. The original editor renders with Metal in the engine process and shares its completed frames with the foreground app.
+Pass `--nam-vst3 "/path/to/NeuralAmpModeler.vst3"` with `--device` and `--embedded-engine` to include the supported local Neural Amp Modeler 0.7.13 release. Choose **with Bitwig** in Bitwig Settings → Plug-ins. The build adapts the original ARM64 plug-in and compiles its matching upstream MetalNanoVG shader for iPadOS using the Xcode Metal toolchain. The original editor renders with Metal in the engine process and shares its completed frames with the foreground app. Its model and impulse response controls open the iPad Files picker. Selected `.nam` and `.wav` files are copied into the shared Bitwig user directory so saved projects can reopen them.
 
 ## Source checks
 

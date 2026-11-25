@@ -67,6 +67,21 @@ static NSURL *surfaceDirectory(void) {
 }
 @end
 
+#if BW_IPLUG_EDITOR
+extern id BWNAMPresentOpenPanel(NSString *extension, void (^complete)(NSURL *));
+extern void BWNAMCancelOpenPanel(id panel);
+
+static NSURL *documentURL(BWEditorMapping *mapping, NSString *suffix) {
+    return [mapping.url URLByAppendingPathExtension:suffix];
+}
+
+static void removeDocumentExchange(BWEditorMapping *mapping) {
+    if (!mapping) return;
+    [NSFileManager.defaultManager removeItemAtURL:documentURL(mapping, @"nam-request") error:nil];
+    [NSFileManager.defaultManager removeItemAtURL:documentURL(mapping, @"nam-result") error:nil];
+}
+#endif
+
 @interface BWEditorPublisher : NSObject
 @property(nonatomic, strong) BWEditorMapping *mapping;
 @property(nonatomic, strong) UIView *parent;
@@ -79,11 +94,41 @@ static NSURL *surfaceDirectory(void) {
 @property(nonatomic) CGContextRef bitmap;
 @property(nonatomic, strong) UIGraphicsImageRenderer *renderer;
 #if BW_IPLUG_EDITOR
+@property(nonatomic, copy) void (^documentReply)(NSURL *);
 @property(nonatomic) uint64_t metalFrameSequence;
 #endif
 - (void)tick;
 - (void)releaseInput;
 @end
+
+#if BW_IPLUG_EDITOR
+static NSMapTable<UIView *, BWEditorPublisher *> *namPublishers;
+static __weak BWEditorPublisher *editorDispatch;
+
+// NAM's folder controls invoke their actions when the original renderer
+// finishes the click animation, after the input callback has returned.
+void BWDispatchNAMRender(UIView *view, SEL selector, IMP original) {
+    BWEditorPublisher *publisher = NSThread.isMainThread ? [namPublishers objectForKey:view] : nil;
+    if (!publisher) {
+        ((void (*)(id, SEL))original)(view, selector);
+        return;
+    }
+    BWEditorPublisher *priorDispatch = editorDispatch;
+    editorDispatch = publisher;
+    @try { ((void (*)(id, SEL))original)(view, selector); }
+    @finally { editorDispatch = priorDispatch; }
+}
+
+BOOL BWNAMRequestOpenPanel(NSString *extension, void (^complete)(NSURL *)) {
+    BWEditorPublisher *publisher = editorDispatch;
+    if (!publisher || !BWIsNAMEditorView(publisher.view) || publisher.documentReply ||
+        !([extension isEqualToString:@"nam"] || [extension isEqualToString:@"wav"])) return NO;
+    NSURL *request = documentURL(publisher.mapping, @"nam-request");
+    if (![extension writeToURL:request atomically:YES encoding:NSUTF8StringEncoding error:nil]) return NO;
+    publisher.documentReply = complete;
+    return YES;
+}
+#endif
 
 @implementation BWEditorPublisher
 - (BOOL)publishPixels:(const void *)pixels width:(NSUInteger)width height:(NSUInteger)height points:(CGSize)size {
@@ -127,6 +172,25 @@ static NSURL *surfaceDirectory(void) {
     surface->cancelRequested = 0;
     [mapping unlock];
 
+#if BW_IPLUG_EDITOR
+    if (close) self.documentReply = nil;
+    if (self.documentReply) {
+        NSURL *result = documentURL(mapping, @"nam-result");
+        NSString *path = [NSString stringWithContentsOfURL:result encoding:NSUTF8StringEncoding error:nil];
+        if (path) {
+            [NSFileManager.defaultManager removeItemAtURL:result error:nil];
+            void (^complete)(NSURL *) = self.documentReply;
+            self.documentReply = nil;
+            NSURL *import = [[BWSharedContainerURL() URLByAppendingPathComponent:@"BitwigUser/Imports" isDirectory:YES] URLByResolvingSymlinksInPath];
+            NSURL *file = path.length ? [[NSURL fileURLWithPath:path] URLByResolvingSymlinksInPath] : nil;
+            NSString *root = [import.path stringByAppendingString:@"/"];
+            complete(root && [file.path hasPrefix:root] ? file : nil);
+            if (self.mapping != mapping) return;
+        }
+    }
+    BWEditorPublisher *priorDispatch = editorDispatch;
+    editorDispatch = self;
+#endif
     for (uint8_t i = 0; i < count; ++i) {
         BWEditorInput event = pending[i];
         if (event.phase >= BWEditorKeyDown && event.phase <= BWEditorKeyFlags) {
@@ -151,6 +215,9 @@ static NSURL *surfaceDirectory(void) {
             self.lastPoint = point;
         }
     }
+#if BW_IPLUG_EDITOR
+    editorDispatch = priorDispatch;
+#endif
     if (cancel) [self releaseInput];
     if (close) {
         [self releaseInput];
@@ -230,6 +297,12 @@ static id publishEditor(UIView *parent, UIView *view, dispatch_block_t close) {
     publisher.parent = parent;
     publisher.view = view;
     publisher.mapping = mapping;
+#if BW_IPLUG_EDITOR
+    if (BWIsNAMEditorView(view)) {
+        if (!namPublishers) namPublishers = [NSMapTable weakToWeakObjectsMapTable];
+        [namPublishers setObject:publisher forKey:view];
+    }
+#endif
     publisher.close = close;
     publisher.heldKeys = [NSMutableDictionary new];
     __weak BWEditorPublisher *weakPublisher = publisher;
@@ -258,6 +331,12 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
         publisher.mapping.surface->pointerCount = 0;
         [publisher.mapping unlock];
     }
+#if BW_IPLUG_EDITOR
+    publisher.documentReply = nil;
+    if (publisher.view && [namPublishers objectForKey:publisher.view] == publisher)
+        [namPublishers removeObjectForKey:publisher.view];
+    removeDocumentExchange(publisher.mapping);
+#endif
     publisher.mapping = nil;
 }
 
@@ -273,6 +352,11 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
 @property(nonatomic) CGSize editorSize;
 @property(nonatomic) BOOL closing;
 @property(nonatomic, weak) UIResponder *priorResponder;
+#if BW_IPLUG_EDITOR
+@property(nonatomic, strong) id documentPicker;
+- (void)pollDocument;
+- (void)cancelDocument;
+#endif
 - (BOOL)refresh;
 @end
 
@@ -409,6 +493,27 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
     [self.heldKeys removeAllObjects];
     return YES;
 }
+#if BW_IPLUG_EDITOR
+- (void)pollDocument {
+    if (self.documentPicker || self.closing) return;
+    NSURL *request = documentURL(self.mapping, @"nam-request");
+    NSString *extension = [NSString stringWithContentsOfURL:request encoding:NSUTF8StringEncoding error:nil];
+    if (!extension) return;
+    [NSFileManager.defaultManager removeItemAtURL:request error:nil];
+    NSURL *result = documentURL(self.mapping, @"nam-result");
+    __weak BWEditorViewport *weakSelf = self;
+    self.documentPicker = BWNAMPresentOpenPanel(extension, ^(NSURL *file) {
+        BWEditorViewport *viewport = weakSelf;
+        if (!viewport || viewport.closing) return;
+        [(file.path ?: @"") writeToURL:result atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        viewport.documentPicker = nil;
+    });
+}
+- (void)cancelDocument {
+    if (self.documentPicker) BWNAMCancelOpenPanel(self.documentPicker);
+    self.documentPicker = nil;
+}
+#endif
 - (BOOL)refresh {
     if (![self.mapping lock]) return YES;
     BWEditorSurface *surface = self.mapping.surface;
@@ -478,7 +583,15 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
     if (!viewports) viewports = [NSMutableDictionary new];
     for (NSURL *url in viewports.allKeys) {
         BWEditorViewport *viewport = viewports[url];
-        if ([viewport refresh]) continue;
+        if ([viewport refresh]) {
+#if BW_IPLUG_EDITOR
+            [viewport pollDocument];
+#endif
+            continue;
+        }
+#if BW_IPLUG_EDITOR
+        [viewport cancelDocument];
+#endif
         UIWindow *window = viewport.window;
         BOOL focused = viewport.isFirstResponder;
         UIResponder *prior = viewport.priorResponder;
@@ -504,6 +617,9 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
         double age = NSProcessInfo.processInfo.systemUptime - mapping.surface->heartbeat;
         [mapping unlock];
         if (valid && age > 30 && kill(pid, 0) == -1 && errno == ESRCH) {
+#if BW_IPLUG_EDITOR
+            removeDocumentExchange(mapping);
+#endif
             unlink(url.fileSystemRepresentation);
             continue;
         }
