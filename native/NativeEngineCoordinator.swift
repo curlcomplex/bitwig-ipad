@@ -5,10 +5,10 @@ import AVFAudio
 @_silgen_name("BWPrepareAudioOutput") private func prepareAudioOutput()->Bool
 @_silgen_name("BWStopAudioOutput") private func stopAudioOutput()
 
-@objc private protocol EngineExtensionFactory {
+@objc protocol EngineExtensionFactory {
     @objc(extensionWithIdentifier:error:) func extensionWithIdentifier(_ identifier:String) throws -> AnyObject
 }
-@objc private protocol EngineExtensionRequest {
+@objc protocol EngineExtensionRequest {
     @objc(beginExtensionRequestWithInputItems:completion:) func begin(_ items:[Any],completion:@escaping(NSUUID?)->Void)
     @objc(pidForRequestIdentifier:) func pid(_ identifier:NSUUID)->Int32
     @objc(setRequestCompletionBlock:) func setCompletion(_ block:@escaping(NSUUID?,[Any]?)->Void)

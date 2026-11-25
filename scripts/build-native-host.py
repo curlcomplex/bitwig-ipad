@@ -9,6 +9,7 @@ import shutil
 import zipfile
 from pathlib import Path
 from bitwig_source import BitwigSource, ENGINE, JNI, ROOT, java_probe_info, sha256
+from surge_clap import BUNDLE_NAME, HELPER_PATH, stage_surge, stage_metadata_helper
 from local_config import build_identity, jni_include_paths, selected_simulator, simulator_argument
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--run',action='store_true',help='Install and launch the built Simulator host')
@@ -16,7 +17,9 @@ simulator_argument(parser)
 parser.add_argument('--device',action='store_true',help='Build/sign the native iPad host with its embedded JIT helper')
 parser.add_argument('--embedded-tunnel',action='store_true',help='Include the local developer tunnel in the iPad app; configuration requires its setup button')
 parser.add_argument('--embedded-engine',action='store_true',help='Include the adapted audio engine in its own native extension process')
+parser.add_argument('--surge-clap', type=Path, help='Include the supported local Surge XT 1.3.4 desktop CLAP without its editor')
 bitwig=BitwigSource(parser);args=bitwig.args
+if args.surge_clap and not args.embedded_engine: parser.error('--surge-clap requires --embedded-engine')
 if args.embedded_tunnel and not args.device: parser.error('--embedded-tunnel requires --device')
 if args.embedded_engine and not args.device: parser.error('--embedded-engine requires --device')
 if args.run and args.device: parser.error('--run only applies to the Simulator host')
@@ -27,6 +30,7 @@ SOURCE = bitwig.contents
 build_name = 'native-host-tunnel' if args.embedded_tunnel else 'native-host-device' if args.device else 'native-host'
 if args.embedded_tunnel and not args.embedded_engine: build_name += '-no-engine'
 if args.embedded_engine and not args.embedded_tunnel: build_name += '-engine'
+if args.surge_clap: build_name += '-surge'
 BUILD = bitwig.build / build_name
 audit_path = bitwig.evidence / 'native-port-audit.json'
 try:
@@ -105,6 +109,12 @@ for name in ['libbitwig-jni.jnilib','JavaNativeFoundation','libsqlitejdbc.jnilib
     run('codesign','--force','--sign','-',dest)
     mapping[name]=changes
 run('codesign','--force','--sign','-',compat)
+if args.surge_clap:
+    try:
+        stage_surge(args.surge_clap, LIB, SDK, CC, ROOT/'native/compat', args.device)
+        stage_metadata_helper(SOURCE, LIB, BUILD)
+    except (OSError, ValueError) as error:
+        parser.error(f'Could not stage Surge XT CLAP: {error}')
 (bitwig.evidence/('native-host-device-library-mappings.json' if args.device else 'native-host-library-mappings.json')).write_text(json.dumps(mapping,indent=2)+'\n')
 print(LIB)
 APP=BUILD/'BitwigNativeHost.app'
@@ -113,13 +123,24 @@ if args.device:
     for folder in ['lib','conf']:shutil.copytree(ROOT/'vendor/java25-ios'/folder,APP/'jre'/folder,dirs_exist_ok=True)
     shutil.copy2(ROOT/'vendor/java25-ios/release',APP/'jre/release')
 else:shutil.copytree(bitwig.build/'native-java/BitwigJavaProbe.app/jre',APP/'jre',dirs_exist_ok=True)
+if args.surge_clap:
+    previous_bundle=APP/'Frameworks'/BUNDLE_NAME
+    if previous_bundle.exists(): shutil.rmtree(previous_bundle)
 shutil.copytree(LIB,APP/'Frameworks',dirs_exist_ok=True)
 if args.embedded_engine:
     shutil.copy2(engine_bundle,APP/'Frameworks'/engine_bundle.name)
+    if args.surge_clap:
+        local_engine=APP/'Frameworks'/engine_bundle.name
+        run('xcrun','install_name_tool','-change','/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',
+            '@rpath/libSurgeCoreFoundationBridge.dylib',local_engine)
     shutil.copy2(entry_path,APP/'engine-entry.json')
     engine_path=APP/'installation/Contents/MacOS/Bitwig Audio Engine ARM64-NEON.app/Contents/MacOS/BitwigAudioEngine-ARM64-NEON'
     engine_path.parent.mkdir(parents=True,exist_ok=True)
     if not engine_path.is_symlink():engine_path.symlink_to('../../../../../../Frameworks/BitwigAudioEngine.bundle')
+    if args.surge_clap:
+        helper_path=APP/'installation/Contents'/HELPER_PATH
+        helper_path.parent.mkdir(parents=True,exist_ok=True)
+        if not helper_path.is_symlink(): helper_path.symlink_to('../../../../../../Frameworks/BitwigPluginHost.bundle')
 for name in ['bitwig.jar','libs.jar']: shutil.copy2(SOURCE/'Java'/name,APP/name)
 resources = APP / 'installation/Contents/Resources'
 if resources.exists(): shutil.rmtree(resources)
@@ -218,6 +239,19 @@ PYSIGN'''
             'settings':{'base':{**common,'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier']+'.engine',
                 'INFOPLIST_FILE':str(BUILD/'Engine-Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Engine.entitlements'),'CLANG_ENABLE_OBJC_ARC':'YES',
                 'APPLICATION_EXTENSION_API_ONLY':'YES','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../../Frameworks'}}}
+    if args.surge_clap:
+        host['sources'].append({'path':str(ROOT/'native/NativePluginMetadataCoordinator.swift')})
+        host['dependencies'].append({'target':'BitwigPluginMetadata','embed':True})
+        metadata_info=dict(engine_info)
+        metadata_info['NSExtension']=dict(engine_info['NSExtension'],NSExtensionPrincipalClass='NativePluginMetadataHandler')
+        metadata_info['CFBundleDisplayName']='Bitwig Plug-in Metadata'
+        (BUILD/'Plug-in-Metadata-Info.plist').write_bytes(plistlib.dumps(metadata_info))
+        project['targets']['BitwigPluginMetadata']={'type':'app-extension','platform':'iOS','deploymentTarget':'26.0',
+            'sources':[{'path':str(ROOT/'native/NativePluginMetadataExtension.m')}],
+            'settings':{'base':{**common,'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier']+'.pluginmetadata',
+                'INFOPLIST_FILE':str(BUILD/'Plug-in-Metadata-Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Engine.entitlements'),
+                'CLANG_ENABLE_OBJC_ARC':'YES','APPLICATION_EXTENSION_API_ONLY':'YES',
+                'LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../../Frameworks'}}}
     if args.embedded_tunnel:
         host=project['targets']['BitwigNativeHost']
         host['sources'] += [
