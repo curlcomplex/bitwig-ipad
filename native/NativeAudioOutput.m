@@ -386,9 +386,14 @@ BOOL BWPrepareAudioOutput(void) {
             if (atomic_load(&ring->callbacks) != startingCallbacks)
                 atomic_store(&ring->actualRunning, 1);
             else if (ticks - startTick >= 100) {
-                AudioOutputUnitStop(output);
-                unitStarted = NO;
-                atomic_store(&ring->error, kAudioUnitErr_FailedInitialization);
+                OSStatus stopped = AudioOutputUnitStop(output);
+                if (stopped) {
+                    needsSessionActivation = YES;
+                    invalidateRoute();
+                } else {
+                    unitStarted = NO;
+                }
+                atomic_store(&ring->error, stopped ?: kAudioUnitErr_FailedInitialization);
                 atomic_compare_exchange_strong(&ring->requestedGeneration, &requested, 0);
                 NSLog(@"Native audio route did not deliver its first callback");
             }
