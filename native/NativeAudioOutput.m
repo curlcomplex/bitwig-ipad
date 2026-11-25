@@ -19,7 +19,7 @@ static AudioBufferList *captureBuffers;
 static float *captureSamples;
 static UInt32 captureCapacity;
 static BOOL engineDetached, clearCaptureOnIdle;
-static BOOL audioInterrupted, needsSessionActivation, resumeDeferred, unitStarted;
+static BOOL needsSessionActivation, unitStarted;
 
 void BWStopAudioOutput(void) {
     if (!ring) return;
@@ -270,8 +270,6 @@ BOOL BWPrepareAudioOutput(void) {
     if (ring) {
         finishIdleCapture();
         if (!activateSession(session)) return NO;
-        audioInterrupted = NO;
-        resumeDeferred = NO;
         OSStatus refreshed = configureRoute(session, output == NULL);
         // A surviving producer may still be releasing the invalidated route.
         return refreshed == noErr || refreshed == kAudioUnitErr_CannotDoInCurrentContext;
@@ -310,23 +308,6 @@ BOOL BWPrepareAudioOutput(void) {
     OSStatus initial = configureRoute(session, YES);
 
     NSNotificationCenter *notifications = NSNotificationCenter.defaultCenter;
-    [notifications addObserverForName:AVAudioSessionInterruptionNotification object:session queue:NSOperationQueue.mainQueue
-       usingBlock:^(NSNotification *note) {
-        NSNumber *type = note.userInfo[AVAudioSessionInterruptionTypeKey];
-        if (!type) return;
-        if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeBegan) {
-            audioInterrupted = YES;
-            needsSessionActivation = YES;
-            invalidateRoute();
-            NSLog(@"Native audio session interrupted");
-        } else if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) {
-            audioInterrupted = NO;
-            NSUInteger options = [note.userInfo[AVAudioSessionInterruptionOptionKey] unsignedIntegerValue];
-            resumeDeferred = !(options & AVAudioSessionInterruptionOptionShouldResume);
-            NSLog(@"Native audio interruption ended resume=%d", !resumeDeferred);
-            if (!resumeDeferred && activateSession(session)) configureRoute(session, YES);
-        }
-    }];
     for (NSString *name in @[AVAudioSessionRouteChangeNotification, AVAudioSessionMediaServicesWereResetNotification]) {
         [notifications addObserverForName:name object:session queue:NSOperationQueue.mainQueue
            usingBlock:^(NSNotification *note) {
@@ -335,8 +316,8 @@ BOOL BWPrepareAudioOutput(void) {
                 invalidateRoute();
                 needsSessionActivation = YES;
                 [session setCategory:category mode:AVAudioSessionModeDefault options:options error:nil];
-                if (!audioInterrupted && !resumeDeferred && activateSession(session)) configureRoute(session, YES);
-            } else if (!audioInterrupted && !resumeDeferred) {
+                if (activateSession(session)) configureRoute(session, YES);
+            } else {
                 NSUInteger reason = [note.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
                 BOOL deviceChanged = reason == AVAudioSessionRouteChangeReasonNewDeviceAvailable ||
                     reason == AVAudioSessionRouteChangeReasonOldDeviceUnavailable ||
@@ -358,7 +339,7 @@ BOOL BWPrepareAudioOutput(void) {
     __block uint64_t startingCallbacks = 0;
     dispatch_source_set_event_handler(audioTimer, ^{
         finishIdleCapture();
-        if (!audioInterrupted && !needsSessionActivation && (atomic_load(&ring->routeGeneration) & 1) && ticks % 5 == 0)
+        if (!needsSessionActivation && (atomic_load(&ring->routeGeneration) & 1) && ticks % 5 == 0)
             configureRoute(session, YES);
         uint64_t generation = atomic_load(&ring->routeGeneration);
         uint64_t requested = atomic_load(&ring->requestedGeneration);
@@ -405,8 +386,6 @@ BOOL BWPrepareAudioOutput(void) {
                 @"running": @(atomic_load(&ring->actualRunning)), @"error": @(atomic_load(&ring->error)),
                 @"requested_generation": @(atomic_load(&ring->requestedGeneration)),
                 @"engine_generation": @(atomic_load(&ring->engineActiveGeneration)),
-                @"session_interrupted": @(audioInterrupted),
-                @"resume_deferred": @(resumeDeferred),
                 @"callbacks": @(atomic_load(&ring->callbacks)), @"audible_frames": @(atomic_load(&ring->audibleFrames)),
                 @"underrun_frames": @(atomic_load(&ring->underrunFrames)),
                 @"queued_frames": @(BWAudioQueued(atomic_load(&ring->writeFrame), atomic_load(&ring->readFrame))),
