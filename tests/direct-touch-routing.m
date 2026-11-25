@@ -2,7 +2,10 @@
 #import <UIKit/UIKit.h>
 #include <assert.h>
 
-@interface NSView : UIView @end
+@interface NSView : UIView
+- (BOOL)handleHardwarePress:(UIPress *)press down:(BOOL)down;
+- (void)cancelHardwareKeys;
+@end
 @interface NSGestureRecognizer : NSObject
 @property(nonatomic) NSUInteger allowedTouchTypes;
 @property(nonatomic, weak) id delegate;
@@ -11,6 +14,13 @@
 - (void)reset;
 @end
 @interface NSEvent : NSObject
+@property(nonatomic, readonly) NSUInteger modifierFlags;
+@property(nonatomic, readonly) NSInteger type, buttonNumber;
+@property(nonatomic, readonly) unsigned short keyCode;
+@property(nonatomic, readonly) BOOL isARepeat;
+@property(nonatomic, readonly) NSString *charactersIgnoringModifiers;
++ (NSUInteger)pressedMouseButtons;
++ (CGPoint)mouseLocation;
 - (NSSet *)touchesMatchingPhase:(NSUInteger)phases inView:(UIView *)view;
 @end
 @interface NSTouch : NSObject
@@ -57,6 +67,7 @@
 @interface TestView : NSView
 @property(nonatomic, strong) UIWindow *testWindow;
 @property(nonatomic) NSUInteger mouseMoves, mouseDowns, mouseUps, mouseDrags;
+@property(nonatomic, strong) NSMutableArray<NSEvent *> *secondaryEvents, *keyEvents;
 @end
 @implementation TestView
 - (UIWindow *)window { return self.testWindow; }
@@ -65,6 +76,12 @@
 - (void)mouseDown:(NSEvent *)event { self.mouseDowns++; }
 - (void)mouseUp:(NSEvent *)event { self.mouseUps++; }
 - (void)mouseDragged:(NSEvent *)event { self.mouseDrags++; }
+- (void)rightMouseDown:(NSEvent *)event { assert(NSEvent.pressedMouseButtons == 2); [self.secondaryEvents addObject:event]; }
+- (void)rightMouseDragged:(NSEvent *)event { assert(NSEvent.pressedMouseButtons == 2); [self.secondaryEvents addObject:event]; }
+- (void)rightMouseUp:(NSEvent *)event { assert(NSEvent.pressedMouseButtons == 0); [self.secondaryEvents addObject:event]; }
+- (void)keyDown:(NSEvent *)event { [self.keyEvents addObject:event]; }
+- (void)keyUp:(NSEvent *)event { [self.keyEvents addObject:event]; }
+- (void)flagsChanged:(NSEvent *)event { [self.keyEvents addObject:event]; }
 @end
 
 @interface TestTouch : NSObject
@@ -79,10 +96,96 @@
 - (CGFloat)force { return 1; }
 @end
 
+@interface TestInputEvent : NSObject
+@property(nonatomic) UIEventButtonMask buttonMask;
+@property(nonatomic) UIKeyModifierFlags modifierFlags;
+@end
+@implementation TestInputEvent @end
+
+@interface TestKey : NSObject
+@property(nonatomic) UIKeyboardHIDUsage keyCode;
+@property(nonatomic) UIKeyModifierFlags modifierFlags;
+@property(nonatomic, copy) NSString *characters, *charactersIgnoringModifiers;
+@end
+@implementation TestKey @end
+
+@interface TestPress : NSObject
+@property(nonatomic, strong) TestKey *key;
+@end
+@implementation TestPress
+- (NSTimeInterval)timestamp { return 1; }
+@end
+
+static void testHardware(TestView *view) {
+    view.secondaryEvents = [NSMutableArray new];
+    view.keyEvents = [NSMutableArray new];
+    NSUInteger previousLeftDowns = view.mouseDowns;
+    TestTouch *pointer = [TestTouch new];
+    pointer.type = UITouchTypeIndirectPointer;
+    pointer.point = CGPointMake(50, 60);
+    NSSet *touches = [NSSet setWithObject:pointer];
+    TestInputEvent *input = [TestInputEvent new];
+    input.buttonMask = UIEventButtonMaskSecondary;
+    input.modifierFlags = UIKeyModifierShift;
+    [view touchesBegan:(id)touches withEvent:(id)input];
+    input.buttonMask = 0;
+    [view touchesMoved:(id)touches withEvent:(id)input];
+    [view touchesCancelled:(id)touches withEvent:(id)input];
+    assert(view.mouseDowns == previousLeftDowns);
+    assert(view.secondaryEvents.count == 3);
+    assert(view.secondaryEvents[0].type == 3 && view.secondaryEvents[1].type == 7 && view.secondaryEvents[2].type == 4);
+    for (NSEvent *event in view.secondaryEvents) assert(event.buttonNumber == 1 && event.modifierFlags == UIKeyModifierShift);
+
+    TestPress *chord = [TestPress new];
+    chord.key = [TestKey new];
+    chord.key.keyCode = UIKeyboardHIDUsageKeyboardLeftGUI;
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    assert(view.keyEvents.lastObject.type == 12 && view.keyEvents.lastObject.keyCode == 55);
+    assert(view.keyEvents.lastObject.modifierFlags == UIKeyModifierCommand);
+    TestPress *key = [TestPress new];
+    key.key = [TestKey new];
+    key.key.keyCode = UIKeyboardHIDUsageKeyboardD;
+    key.key.characters = key.key.charactersIgnoringModifiers = @"d";
+    key.key.modifierFlags = UIKeyModifierCommand;
+    assert([view handleHardwarePress:(id)key down:YES]);
+    assert(view.keyEvents.lastObject.type == 10 && view.keyEvents.lastObject.keyCode == 2);
+    assert([view.keyEvents.lastObject.charactersIgnoringModifiers isEqualToString:@"d"]);
+    assert(!view.keyEvents.lastObject.isARepeat);
+    assert([view handleHardwarePress:(id)key down:YES]);
+    assert(view.keyEvents.lastObject.isARepeat);
+    assert([view handleHardwarePress:(id)key down:NO]);
+    assert(view.keyEvents.lastObject.type == 11 && !view.keyEvents.lastObject.isARepeat);
+    assert([view handleHardwarePress:(id)chord down:NO]);
+    assert(view.keyEvents.lastObject.type == 12 && view.keyEvents.lastObject.modifierFlags == 0);
+
+    chord.key.keyCode = UIKeyboardHIDUsageKeyboardLeftControl;
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    assert(view.keyEvents.lastObject.modifierFlags == UIKeyModifierControl);
+    [view cancelHardwareKeys];
+    assert(view.keyEvents.lastObject.modifierFlags == 0);
+    assert(![view handleHardwarePress:(id)chord down:NO]);
+    chord.key.keyCode = UIKeyboardHIDUsageKeyboardCapsLock;
+    NSUInteger beforeCaps = view.keyEvents.count;
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    assert([view handleHardwarePress:(id)chord down:NO]);
+    assert(view.keyEvents.count == beforeCaps + 1);
+    assert(view.keyEvents.lastObject.type == 12 && view.keyEvents.lastObject.keyCode == 57);
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    [view cancelHardwareKeys];
+    assert([view handleHardwarePress:(id)chord down:NO]);
+    assert(view.keyEvents.count == beforeCaps + 2);
+}
+
 @interface UIWindow (DesktopDragTest)
 - (CGPoint)convertPointToScreen:(CGPoint)point;
 - (void)setFrameOrigin:(CGPoint)origin;
 - (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location;
+- (CGPoint)mouseLocationOutsideOfEventStream;
+@end
+
+@interface NSWindow : NSObject
+- (void)setFrame:(CGRect)frame display:(BOOL)display;
 @end
 
 @interface NSScreen : NSObject @end
@@ -169,6 +272,16 @@
 
 static void testDesktopDrag(void) {
     UIWindow *window = [[NSClassFromString(@"BWUIKitWindow") alloc] initWithFrame:CGRectZero];
+    NSWindow *appKitWindow = [NSWindow new];
+    [window setValue:appKitWindow forKey:@"desktopWindow"];
+    CGPoint screenMouse = NSEvent.mouseLocation;
+    CGPoint origins[] = {CGPointZero, CGPointMake(205, 241), CGPointMake(screenMouse.x + 20, screenMouse.y + 10)};
+    for (size_t i = 0; i < sizeof(origins)/sizeof(*origins); i++) {
+        CGPoint origin = origins[i];
+        [appKitWindow setFrame:CGRectMake(origin.x, origin.y, 320, 200) display:NO];
+        assert(CGPointEqualToPoint(window.mouseLocationOutsideOfEventStream,
+                                   CGPointMake(screenMouse.x - origin.x, screenMouse.y - origin.y)));
+    }
     DragTestDesktopWindow *desktop = [DragTestDesktopWindow new];
     desktop.window = window;
     desktop.frame = CGRectMake(205, 241, 320, 200);
@@ -261,7 +374,8 @@ int main(void) {
         assert(recognizer.resets == 3);
         [view touchesEnded:(id)[NSSet setWithObject:left] withEvent:nil];
         assert(recognizer.deliveries.count == 7 && view.mouseUps == 1);
+        testHardware(view);
         testDesktopDrag();
-        puts("Direct touch identity, coordinates, staggered release, cancellation, mouse/hover and popup drag passed");
+        puts("Direct touch, popup drag, hardware keys and primary/secondary pointer routing passed");
     }
 }

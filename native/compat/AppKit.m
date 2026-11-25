@@ -4,6 +4,7 @@
 // they must be implemented from observed use, never swallowed as successful calls.
 #import <UIKit/UIKit.h>
 #import "Trace.h"
+#import "HardwareKeys.h"
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 #include <stdatomic.h>
@@ -237,8 +238,12 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 @property(nonatomic, strong) NSMutableArray<NSGestureRecognizer *> *appKitRecognizers;
 @property(nonatomic, strong) NSMapTable<UITouch *, BWTouchRoute *> *touchRoutes;
 @property(nonatomic, strong) UITouch *mouseTouch;
+@property(nonatomic) BOOL secondaryMouseTouch;
 @property(nonatomic, strong) NSMutableSet<UITouch *> *endingTouches;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSEvent *> *hardwareKeys;
+@property(nonatomic) BOOL capsLockKeyDown;
 - (void)cancelActiveContacts;
+- (void)cancelHardwareKeys;
 - (void)updateCursor;
 @end
 @implementation NSView
@@ -278,6 +283,7 @@ BW_TRACE_MISSING_SELECTOR
 - (void)willMoveToWindow:(UIWindow *)newWindow {
     if (self.window && self.window != newWindow) {
         [self cancelActiveContacts];
+        [self cancelHardwareKeys];
         [NSNotificationCenter.defaultCenter removeObserver:self
                                                       name:UISceneWillDeactivateNotification
                                                     object:self.window.windowScene];
@@ -287,6 +293,7 @@ BW_TRACE_MISSING_SELECTOR
 
 - (void)sceneWillDeactivate:(NSNotification *)notification {
     [self cancelActiveContacts];
+    [self cancelHardwareKeys];
 }
 
 - (void)didMoveToWindow {
@@ -318,6 +325,11 @@ BW_TRACE_MISSING_SELECTOR
 - (void)displayIfNeeded { [self layoutIfNeeded]; [self.layer displayIfNeeded]; }
 - (BOOL)canBecomeFirstResponder { return YES; }
 - (BOOL)becomeFirstResponder { if(!self.window.canBecomeKeyWindow)return NO;textInputView=self;return [super becomeFirstResponder]; }
+- (BOOL)resignFirstResponder {
+    BOOL resigned = [super resignFirstResponder];
+    if (resigned) [self cancelHardwareKeys];
+    return resigned;
+}
 - (UIView*)inputView { static UIView *empty; if(!empty)empty=[[UIView alloc] initWithFrame:CGRectZero];return textInputActive?nil:empty; }
 - (UIView*)inputAccessoryView {
     if(!textInputActive)return nil;
@@ -369,12 +381,15 @@ BW_TRACE_MISSING_SELECTOR
 - (void)sendTouch:(UITouch*)touch selector:(SEL)selector type:(NSInteger)type {
     if(type==1)pressedMouseButtons|=1;
     else if(type==2)pressedMouseButtons&=~(NSUInteger)1;
+    else if(type==3)pressedMouseButtons|=2;
+    else if(type==4)pressedMouseButtons&=~(NSUInteger)2;
     if(![self respondsToSelector:selector])return;
     CGPoint current=[touch locationInView:self.window],previous=[touch previousLocationInView:self.window];
     NSEvent *event=[NSEvent new];event.window=self.window;event.locationInWindow=windowEventLocation(self.window,current);event.timestamp=touch.timestamp;event.clickCount=touch.tapCount;event.type=type;event.pressure=touch.force;
     event.deltaX=current.x-previous.x;event.deltaY=current.y-previous.y;
+    if (type == 3 || type == 4 || type == 7) event.buttonNumber = 1;
     event.modifierFlags=currentModifierFlags;
-    if(type==1||type==2)fprintf(stdout,"[UIKit input] type=%ld window=(%.1f,%.1f) event=(%.1f,%.1f) windowSize=(%.1f,%.1f) viewSize=(%.1f,%.1f)\n",(long)type,current.x,current.y,event.locationInWindow.x,event.locationInWindow.y,self.window.bounds.size.width,self.window.bounds.size.height,self.bounds.size.width,self.bounds.size.height);
+    if(type>=1&&type<=4)fprintf(stdout,"[UIKit input] type=%ld window=(%.1f,%.1f) event=(%.1f,%.1f) windowSize=(%.1f,%.1f) viewSize=(%.1f,%.1f)\n",(long)type,current.x,current.y,event.locationInWindow.x,event.locationInWindow.y,self.window.bounds.size.width,self.window.bounds.size.height,self.bounds.size.width,self.bounds.size.height);
     deliverEvent(self,selector,event);
 }
 - (void)addGestureRecognizer:(UIGestureRecognizer *)recognizer {
@@ -425,7 +440,7 @@ BW_TRACE_MISSING_SELECTOR
     return touch;
 }
 
-- (void)beginContacts:(NSSet<UITouch *> *)touches {
+- (void)beginContacts:(NSSet<UITouch *> *)touches buttonMask:(UIEventButtonMask)buttonMask {
     static NSUInteger nextIdentity;
     for (UITouch *touch in touches) {
         if (touch.type == UITouchTypeDirect && self.appKitRecognizers.count) {
@@ -453,8 +468,11 @@ BW_TRACE_MISSING_SELECTOR
         }
         if (!self.mouseTouch) {
             self.mouseTouch = touch;
+            self.secondaryMouseTouch = touch.type == UITouchTypeIndirectPointer &&
+                (buttonMask & UIEventButtonMaskSecondary) && !(buttonMask & UIEventButtonMaskPrimary);
             [self sendTouch:touch selector:@selector(mouseMoved:) type:5];
-            [self sendTouch:touch selector:@selector(mouseDown:) type:1];
+            if (self.secondaryMouseTouch) [self sendTouch:touch selector:@selector(rightMouseDown:) type:3];
+            else [self sendTouch:touch selector:@selector(mouseDown:) type:1];
         }
     }
 }
@@ -524,25 +542,33 @@ BW_TRACE_MISSING_SELECTOR
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     currentModifierFlags = event.modifierFlags;
     [self becomeFirstResponder];
-    [self beginContacts:touches];
+    [self beginContacts:touches buttonMask:event.buttonMask];
     [self dispatchContacts:touches event:event phase:BWTouchBegan];
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     currentModifierFlags = event.modifierFlags;
     [self dispatchContacts:touches event:event phase:BWTouchMoved];
-    if (self.mouseTouch && [touches containsObject:self.mouseTouch])
-        [self sendTouch:self.mouseTouch selector:@selector(mouseDragged:) type:6];
+    if (self.mouseTouch && [touches containsObject:self.mouseTouch]) {
+        if (self.secondaryMouseTouch) [self sendTouch:self.mouseTouch selector:@selector(rightMouseDragged:) type:7];
+        else [self sendTouch:self.mouseTouch selector:@selector(mouseDragged:) type:6];
+    }
 }
 
 - (void)finishContacts:(NSSet<UITouch *> *)touches event:(UIEvent *)event cancelled:(BOOL)cancelled {
     currentModifierFlags = event.modifierFlags;
     UITouch *mouse = self.mouseTouch;
-    if (mouse && [touches containsObject:mouse]) self.mouseTouch = nil;
+    BOOL secondary = self.secondaryMouseTouch;
+    if (mouse && [touches containsObject:mouse]) {
+        self.mouseTouch = nil;
+        self.secondaryMouseTouch = NO;
+    }
     else mouse = nil;
     [self dispatchContacts:touches event:event phase:cancelled ? BWTouchCancelled : BWTouchEnded];
     if (mouse) {
-        if (!cancelled || !BWHandleDraggingEvent(lastApplicationEvent, YES))
+        if (secondary)
+            [self sendTouch:mouse selector:@selector(rightMouseUp:) type:4];
+        else if (!cancelled || !BWHandleDraggingEvent(lastApplicationEvent, YES))
             [self sendTouch:mouse selector:@selector(mouseUp:) type:2];
         else
             pressedMouseButtons &= ~(NSUInteger)1;
@@ -564,26 +590,125 @@ BW_TRACE_MISSING_SELECTOR
     [self finishContacts:touches event:event cancelled:YES];
 }
 
-- (void)setEscapeForPresses:(NSSet<UIPress *> *)presses down:(BOOL)down {
-    for (UIPress *press in presses) {
-        if (press.key.keyCode == UIKeyboardHIDUsageKeyboardEscape)
-            atomic_store_explicit(&escapePressed, down, memory_order_relaxed);
+- (void)deliverHardwareKey:(NSEvent *)event {
+    SEL selector = event.type == 12 ? @selector(flagsChanged:) :
+        event.type == 10 ? @selector(keyDown:) : @selector(keyUp:);
+    if (!textInputActive && ((event.modifierFlags & (UIKeyModifierCommand | UIKeyModifierControl)) ||
+                            event.type == 12 || event.keyCode == 49 || event.keyCode == 53) &&
+        [NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+        fprintf(stdout, "[UIKit hardware] type=%ld code=%u flags=%lx repeat=%d\n",
+                (long)event.type, event.keyCode, (unsigned long)event.modifierFlags, event.isARepeat);
+        fflush(stdout);
+    }
+    if ([self respondsToSelector:selector]) deliverEvent(self, selector, event);
+}
+
+- (BOOL)handleHardwarePress:(UIPress *)press down:(BOOL)down {
+    UIKey *key = press.key;
+    if (!key) return NO;
+    UIKeyboardHIDUsage usage = key.keyCode;
+    BOOL capsLock = usage == UIKeyboardHIDUsageKeyboardCapsLock;
+    if (capsLock) {
+        // The original flagsChanged handler sends both native key edges.
+        // One physical press drives one toggle, with no synthetic release.
+        BOOL firstDown = down && !self.capsLockKeyDown;
+        self.capsLockKeyDown = down;
+        if ([NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+            fprintf(stdout, "[UIKit caps] down=%d first=%d flags=%lx\n", down, firstDown,
+                    (unsigned long)key.modifierFlags);
+            fflush(stdout);
+        }
+        if (!firstDown) return YES;
+    }
+    NSInteger code = BWMacVirtualKey(usage);
+    if (code < 0) return NO;
+
+    NSNumber *identifier = @(usage);
+    NSEvent *held = self.hardwareKeys[identifier];
+    NSUInteger modifier = BWKeyModifier(usage);
+    BOOL modifierEvent = modifier || capsLock;
+    if (!down && !held) return NO;
+    NSUInteger flags = key.modifierFlags;
+    if (modifier) {
+        flags &= ~modifier;
+        if (down) flags |= modifier;
+        for (NSNumber *other in self.hardwareKeys)
+            if (![other isEqual:identifier]) flags |= BWKeyModifier(other.integerValue);
+    }
+
+    // UIKit already sends composed text and backspace through UIKeyInput.
+    // Keep that path for normal text while forwarding real shortcuts and
+    // navigation as key events. A held key always stays on its original path.
+    NSString *characters = key.characters ?: @"";
+    NSString *unmodified = key.charactersIgnoringModifiers ?: @"";
+    BOOL editableKey = usage == UIKeyboardHIDUsageKeyboardDeleteOrBackspace ||
+        (usage >= UIKeyboardHIDUsageKeyboardA && usage <= UIKeyboardHIDUsageKeyboard0) ||
+        (usage >= UIKeyboardHIDUsageKeyboardSpacebar && usage <= UIKeyboardHIDUsageKeyboardSlash) ||
+        (characters.length && [characters rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound &&
+         [characters characterAtIndex:0] < 0xf700);
+    if (down && !held && !modifierEvent && editableKey && textInputActive && textInputView == self &&
+        !(flags & (UIKeyModifierCommand | UIKeyModifierControl))) return NO;
+
+    if (modifierEvent) characters = unmodified = @"";
+    else if (usage == UIKeyboardHIDUsageKeyboardDeleteOrBackspace) characters = unmodified = @"\177";
+    NSEvent *event = [NSEvent new];
+    event.type = modifierEvent ? 12 : (down ? 10 : 11);
+    event.keyCode = (unsigned short)code;
+    event.characters = characters;
+    event.charactersIgnoringModifiers = unmodified;
+    event.modifierFlags = currentModifierFlags = flags;
+    event.timestamp = press.timestamp;
+    event.window = self.window;
+    event.isARepeat = down && held && !modifierEvent;
+    if (down && !capsLock) {
+        if (!self.hardwareKeys) self.hardwareKeys = [NSMutableDictionary new];
+        self.hardwareKeys[identifier] = event;
+    } else if (!down) [self.hardwareKeys removeObjectForKey:identifier];
+    if (usage == UIKeyboardHIDUsageKeyboardEscape)
+        atomic_store_explicit(&escapePressed, down, memory_order_relaxed);
+    [self deliverHardwareKey:event];
+    return YES;
+}
+
+- (void)cancelHardwareKeys {
+    NSArray<NSEvent *> *held = self.hardwareKeys.allValues;
+    [self.hardwareKeys removeAllObjects];
+    self.capsLockKeyDown = NO;
+    currentModifierFlags &= UIKeyModifierAlphaShift;
+    atomic_store_explicit(&escapePressed, false, memory_order_relaxed);
+    for (NSEvent *prior in held) {
+        NSEvent *event = [NSEvent new];
+        event.type = prior.type == 12 ? 12 : 11;
+        event.keyCode = prior.keyCode;
+        event.characters = prior.characters;
+        event.charactersIgnoringModifiers = prior.charactersIgnoringModifiers;
+        event.modifierFlags = currentModifierFlags;
+        event.timestamp = NSProcessInfo.processInfo.systemUptime;
+        event.window = self.window;
+        [self deliverHardwareKey:event];
     }
 }
 
+- (NSSet<UIPress *> *)unhandledHardwarePresses:(NSSet<UIPress *> *)presses down:(BOOL)down {
+    NSMutableSet<UIPress *> *unhandled = [NSMutableSet new];
+    for (UIPress *press in presses)
+        if (![self handleHardwarePress:press down:down]) [unhandled addObject:press];
+    return unhandled;
+}
+
 - (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
-    [self setEscapeForPresses:presses down:YES];
-    [super pressesBegan:presses withEvent:event];
+    NSSet *unhandled = [self unhandledHardwarePresses:presses down:YES];
+    if (unhandled.count) [super pressesBegan:unhandled withEvent:event];
 }
 
 - (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
-    [self setEscapeForPresses:presses down:NO];
-    [super pressesEnded:presses withEvent:event];
+    NSSet *unhandled = [self unhandledHardwarePresses:presses down:NO];
+    if (unhandled.count) [super pressesEnded:unhandled withEvent:event];
 }
 
 - (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
-    [self setEscapeForPresses:presses down:NO];
-    [super pressesCancelled:presses withEvent:event];
+    NSSet *unhandled = [self unhandledHardwarePresses:presses down:NO];
+    if (unhandled.count) [super pressesCancelled:unhandled withEvent:event];
 }
 
 @end
@@ -690,6 +815,8 @@ static const NSUInteger BWWindowFullScreenAuxiliary = 1ul << 8;
     dispatch_async(dispatch_get_main_queue(),^{if(self.isKeyWindow)[self notifyKeyState:YES];});
 }
 - (void)resignKeyWindow {
+    UIView *view = self.rootViewController.view;
+    if ([view isKindOfClass:NSView.class]) [(NSView *)view cancelHardwareKeys];
     atomic_store_explicit(&escapePressed, false, memory_order_relaxed);
     [super resignKeyWindow];
     dispatch_async(dispatch_get_main_queue(),^{if(!self.isKeyWindow)[self notifyKeyState:NO];});
@@ -923,6 +1050,7 @@ BW_TRACE_MISSING_SELECTOR
 - (CGRect)frameRectForContentRect:(CGRect)rect { return rect; }
 - (CGPoint)convertPointToScreen:(CGPoint)point { return CGPointMake(self.frame.origin.x+point.x,self.frame.origin.y+point.y); }
 - (CGPoint)convertPointFromScreen:(CGPoint)point { return CGPointMake(point.x-self.frame.origin.x,point.y-self.frame.origin.y); }
+- (CGPoint)mouseLocationOutsideOfEventStream { return [self convertPointFromScreen:mouseScreenLocation]; }
 - (CGRect)convertRectToScreen:(CGRect)rect { rect.origin=[self convertPointToScreen:rect.origin];return rect; }
 - (CGRect)convertRectFromScreen:(CGRect)rect { rect.origin=[self convertPointFromScreen:rect.origin];return rect; }
 - (CGPoint)convertBaseToScreen:(CGPoint)point { return [self convertPointToScreen:point]; }
