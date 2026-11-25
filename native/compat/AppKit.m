@@ -388,7 +388,7 @@ BW_TRACE_MISSING_SELECTOR
     event.deltaX=current.x-previous.x;event.deltaY=current.y-previous.y;
     if (type == 3 || type == 4 || type == 7) event.buttonNumber = 1;
     event.modifierFlags=currentModifierFlags;
-    if(type==1||type==2)fprintf(stdout,"[UIKit input] type=%ld window=(%.1f,%.1f) event=(%.1f,%.1f) windowSize=(%.1f,%.1f) viewSize=(%.1f,%.1f)\n",(long)type,current.x,current.y,event.locationInWindow.x,event.locationInWindow.y,self.window.bounds.size.width,self.window.bounds.size.height,self.bounds.size.width,self.bounds.size.height);
+    if(type>=1&&type<=4)fprintf(stdout,"[UIKit input] type=%ld window=(%.1f,%.1f) event=(%.1f,%.1f) windowSize=(%.1f,%.1f) viewSize=(%.1f,%.1f)\n",(long)type,current.x,current.y,event.locationInWindow.x,event.locationInWindow.y,self.window.bounds.size.width,self.window.bounds.size.height,self.bounds.size.width,self.bounds.size.height);
     deliverEvent(self,selector,event);
 }
 - (void)addGestureRecognizer:(UIGestureRecognizer *)recognizer {
@@ -592,7 +592,6 @@ BW_TRACE_MISSING_SELECTOR
 - (void)deliverHardwareKey:(NSEvent *)event {
     SEL selector = event.type == 12 ? @selector(flagsChanged:) :
         event.type == 10 ? @selector(keyDown:) : @selector(keyUp:);
-    if ([self respondsToSelector:selector]) deliverEvent(self, selector, event);
     if (!textInputActive && ((event.modifierFlags & (UIKeyModifierCommand | UIKeyModifierControl)) ||
                             event.type == 12 || event.keyCode == 49 || event.keyCode == 53) &&
         [NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
@@ -600,6 +599,7 @@ BW_TRACE_MISSING_SELECTOR
                 (long)event.type, event.keyCode, (unsigned long)event.modifierFlags, event.isARepeat);
         fflush(stdout);
     }
+    if ([self respondsToSelector:selector]) deliverEvent(self, selector, event);
 }
 
 - (BOOL)handleHardwarePress:(UIPress *)press down:(BOOL)down {
@@ -1038,6 +1038,7 @@ BW_TRACE_MISSING_SELECTOR
 - (CGRect)frameRectForContentRect:(CGRect)rect { return rect; }
 - (CGPoint)convertPointToScreen:(CGPoint)point { return CGPointMake(self.frame.origin.x+point.x,self.frame.origin.y+point.y); }
 - (CGPoint)convertPointFromScreen:(CGPoint)point { return CGPointMake(point.x-self.frame.origin.x,point.y-self.frame.origin.y); }
+- (CGPoint)mouseLocationOutsideOfEventStream { return [self convertPointFromScreen:mouseScreenLocation]; }
 - (CGRect)convertRectToScreen:(CGRect)rect { rect.origin=[self convertPointToScreen:rect.origin];return rect; }
 - (CGRect)convertRectFromScreen:(CGRect)rect { rect.origin=[self convertPointFromScreen:rect.origin];return rect; }
 - (CGPoint)convertBaseToScreen:(CGPoint)point { return [self convertPointToScreen:point]; }

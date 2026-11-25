@@ -20,6 +20,7 @@
 @property(nonatomic, readonly) BOOL isARepeat;
 @property(nonatomic, readonly) NSString *charactersIgnoringModifiers;
 + (NSUInteger)pressedMouseButtons;
++ (CGPoint)mouseLocation;
 - (NSSet *)touchesMatchingPhase:(NSUInteger)phases inView:(UIView *)view;
 @end
 @interface NSTouch : NSObject
@@ -172,6 +173,11 @@ static void testHardware(TestView *view) {
 - (CGPoint)convertPointToScreen:(CGPoint)point;
 - (void)setFrameOrigin:(CGPoint)origin;
 - (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location;
+- (CGPoint)mouseLocationOutsideOfEventStream;
+@end
+
+@interface NSWindow : NSObject
+- (void)setFrame:(CGRect)frame display:(BOOL)display;
 @end
 
 @interface NSScreen : NSObject @end
@@ -258,6 +264,16 @@ static void testHardware(TestView *view) {
 
 static void testDesktopDrag(void) {
     UIWindow *window = [[NSClassFromString(@"BWUIKitWindow") alloc] initWithFrame:CGRectZero];
+    NSWindow *appKitWindow = [NSWindow new];
+    [window setValue:appKitWindow forKey:@"desktopWindow"];
+    CGPoint screenMouse = NSEvent.mouseLocation;
+    CGPoint origins[] = {CGPointZero, CGPointMake(205, 241), CGPointMake(screenMouse.x + 20, screenMouse.y + 10)};
+    for (size_t i = 0; i < sizeof(origins)/sizeof(*origins); i++) {
+        CGPoint origin = origins[i];
+        [appKitWindow setFrame:CGRectMake(origin.x, origin.y, 320, 200) display:NO];
+        assert(CGPointEqualToPoint(window.mouseLocationOutsideOfEventStream,
+                                   CGPointMake(screenMouse.x - origin.x, screenMouse.y - origin.y)));
+    }
     DragTestDesktopWindow *desktop = [DragTestDesktopWindow new];
     desktop.window = window;
     desktop.frame = CGRectMake(205, 241, 320, 200);
