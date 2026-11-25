@@ -339,6 +339,16 @@ static BOOL BWIsEngineExtension(void) {
 - (void)cancelHardwareKeys;
 - (void)updateCursor;
 @end
+#if BW_IPLUG_EDITOR
+@interface BWDetachedNAMParent : NSView
+@end
+@implementation BWDetachedNAMParent
+// iPlug2 forwards unhandled keys upward. The detached container ends
+// its responder chain because there is no AppKit window in the engine.
+- (void)keyDown:(NSEvent *)event {}
+- (void)keyUp:(NSEvent *)event {}
+@end
+#endif
 @implementation NSView {
     CGRect _drawingRect;
 }
@@ -419,7 +429,12 @@ BW_TRACE_MISSING_SELECTOR
     // vendor's view hierarchy off UIKit's scene-less desktop window.
     NSView *parent = objc_getAssociatedObject(self, &BWDetachedEditorParentKey);
     if (!parent) {
-        parent = [[NSView alloc] initWithFrame:view.bounds];
+        Class parentClass = NSView.class;
+#if BW_IPLUG_EDITOR
+        extern BOOL BWIsNAMEditorView(UIView *view);
+        if (BWIsNAMEditorView(view)) parentClass = BWDetachedNAMParent.class;
+#endif
+        parent = [[parentClass alloc] initWithFrame:view.bounds];
         objc_setAssociatedObject(self, &BWDetachedEditorParentKey, parent, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     parent.frame = view.bounds;
@@ -1943,6 +1958,9 @@ static NSURL *BWProjectSaveDirectory(NSURL *requested) {
 // so both the frontend and the sandboxed audio engine can read them.
 @interface NSOpenPanel : NSSavePanel <UIDocumentPickerDelegate>
 @property BOOL allowsMultipleSelection,canChooseDirectories,canChooseFiles;
+#if BW_IPLUG_EDITOR
+@property BOOL resolvesAliases;
+#endif
 @property(copy) NSArray<NSURL*> *URLs;
 @property(copy) void (^completion)(NSInteger);
 @property(strong) UIDocumentPickerViewController *picker;
@@ -1957,6 +1975,20 @@ static NSURL *BWProjectSaveDirectory(NSURL *requested) {
 }
 + (id)openPanel { return [self new]; }
 - (NSURL*)URL { return self.URLs.firstObject; }
+#if BW_IPLUG_EDITOR
+- (NSString *)filename { return self.URL.path; }
+- (void)beginSheetModalForWindow:(NSWindow *)window completionHandler:(void (^)(NSInteger))completion {
+    if (BWIsEngineExtension()) {
+        extern BOOL BWNAMRequestOpenPanel(NSString *, void (^)(NSURL *));
+        self.completion = completion;
+        if (!BWNAMRequestOpenPanel(self.allowedFileTypes.firstObject, ^(NSURL *file) {
+            [self finishWithURLs:file ? @[file] : @[]];
+        })) [self finishWithURLs:@[]];
+        return;
+    }
+    [self beginWithCompletionHandler:completion];
+}
+#endif
 - (void)beginWithCompletionHandler:(void(^)(NSInteger))completion {
     BWCompatibilityTrace("bridge", "NSOpenPanel", "beginWithCompletionHandler:", "opened");
     BWCompatibilityTrace("bridge", "NSOpenPanel", "canCreateDirectories",
@@ -2010,6 +2042,29 @@ static NSURL *BWProjectSaveDirectory(NSURL *requested) {
     [self finishWithURLs:imported];
 }
 @end
+
+#if BW_IPLUG_EDITOR
+id BWNAMPresentOpenPanel(NSString *extension, void (^complete)(NSURL *)) {
+    if (!([extension isEqualToString:@"nam"] || [extension isEqualToString:@"wav"])) {
+        complete(nil);
+        return nil;
+    }
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.allowedFileTypes = @[extension];
+    __weak NSOpenPanel *weakPanel = panel;
+    [panel beginWithCompletionHandler:^(NSInteger result) {
+        complete(result ? weakPanel.URL : nil);
+    }];
+    return panel.picker ? panel : nil;
+}
+
+void BWNAMCancelOpenPanel(NSOpenPanel *panel) {
+    panel.completion = nil;
+    panel.picker.delegate = nil;
+    [panel.picker dismissViewControllerAnimated:YES completion:nil];
+    panel.picker = nil;
+}
+#endif
 
 BOOL NSPointInRect(CGPoint point, CGRect rect) { return CGRectContainsPoint(rect,point); }
 BOOL NSApplicationLoad(void) { [NSApplication sharedApplication]; return YES; }
