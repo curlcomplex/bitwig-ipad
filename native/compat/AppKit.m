@@ -230,18 +230,43 @@ BOOL BWDeliverDetachedEditorPointer(UIView *view, CGPoint point, CGPoint delta, 
     switch (type) {
         case 1: selector = @selector(mouseDown:); break;
         case 2: selector = @selector(mouseUp:); break;
+        case 3: selector = @selector(rightMouseDown:); break;
+        case 4: selector = @selector(rightMouseUp:); break;
         case 6: selector = @selector(mouseDragged:); break;
+        case 7: selector = @selector(rightMouseDragged:); break;
         default: return NO;
     }
     if (![view respondsToSelector:selector]) return NO;
     if (type == 1) pressedMouseButtons |= 1;
     if (type == 2) pressedMouseButtons &= ~(NSUInteger)1;
+    if (type == 3) pressedMouseButtons |= 2;
+    if (type == 4) pressedMouseButtons &= ~(NSUInteger)2;
     NSEvent *event = [NSEvent new];
     event.type = type;
     event.clickCount = 1;
+    event.buttonNumber = type == 3 || type == 4 || type == 7 ? 1 : 0;
+    event.modifierFlags = currentModifierFlags;
     event.locationInWindow = point;
     event.deltaX = delta.x;
     event.deltaY = delta.y;
+    event.timestamp = NSProcessInfo.processInfo.systemUptime;
+    deliverEvent(view, selector, event);
+    return YES;
+}
+
+BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short keyCode, NSUInteger modifiers,
+                                NSString *characters, NSString *unmodified, BOOL repeat) {
+    if (!NSThread.isMainThread || !view || view.window) return NO;
+    SEL selector = type == 10 ? @selector(keyDown:) : type == 11 ? @selector(keyUp:) : @selector(flagsChanged:);
+    currentModifierFlags = modifiers;
+    if (![view respondsToSelector:selector]) return NO;
+    NSEvent *event = [NSEvent new];
+    event.type = type;
+    event.keyCode = keyCode;
+    event.modifierFlags = modifiers;
+    event.characters = characters;
+    event.charactersIgnoringModifiers = unmodified;
+    event.isARepeat = repeat;
     event.timestamp = NSProcessInfo.processInfo.systemUptime;
     deliverEvent(view, selector, event);
     return YES;

@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "../LocalConfiguration.h"
+#import "../HardwareKeys.h"
 #import "EditorSurface.h"
 #include <fcntl.h>
 #include <signal.h>
@@ -9,6 +10,10 @@
 #include <unistd.h>
 
 extern BOOL BWDeliverDetachedEditorPointer(UIView *view, CGPoint point, CGPoint delta, NSInteger type);
+extern BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short keyCode, NSUInteger modifiers,
+                                      NSString *characters, NSString *unmodified, BOOL repeat);
+
+static BOOL isMove(uint8_t phase) { return phase == BWEditorPointerMove || phase == BWEditorSecondaryMove; }
 
 static NSURL *surfaceDirectory(void) {
     return [BWSharedContainerURL() URLByAppendingPathComponent:@"Plugin Editors" isDirectory:YES];
@@ -62,10 +67,12 @@ static NSURL *surfaceDirectory(void) {
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, copy) dispatch_block_t close;
 @property(nonatomic) CGPoint lastPoint;
-@property(nonatomic) BOOL pressed;
+@property(nonatomic) uint8_t pointerRelease;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *heldKeys;
 @property(nonatomic) CGContextRef bitmap;
 @property(nonatomic, strong) UIGraphicsImageRenderer *renderer;
 - (void)tick;
+- (void)releaseInput;
 @end
 
 @implementation BWEditorPublisher
@@ -74,15 +81,17 @@ static NSURL *surfaceDirectory(void) {
     BWEditorMapping *mapping = self.mapping;
     if (![mapping lock]) return;
     BWEditorSurface *surface = mapping.surface;
-    BWEditorPointer pending[BWEditorPointerCapacity];
+    BWEditorInput pending[BWEditorPointerCapacity];
     uint8_t count = 0;
     uint8_t available = MIN(surface->pointerCount, BWEditorPointerCapacity);
     while (count < available) {
-        BWEditorPointer event = surface->pointers[(surface->pointerRead + count) % BWEditorPointerCapacity];
+        BWEditorInput *slot = &surface->pointers[(surface->pointerRead + count) % BWEditorPointerCapacity];
+        BWEditorInput event = *slot;
+        memset(slot, 0, sizeof(*slot));
         pending[count++] = event;
         // JUCE schedules button edges on its main run loop. Let that edge
         // settle before forwarding the next drag or button edge.
-        if (event.phase != BWEditorPointerMove) break;
+        if (!isMove(event.phase)) break;
     }
     surface->pointerCount = available - count;
     surface->pointerRead = (surface->pointerRead + count) % BWEditorPointerCapacity;
@@ -91,18 +100,31 @@ static NSURL *surfaceDirectory(void) {
     [mapping unlock];
 
     for (uint8_t i = 0; i < count; ++i) {
-        BWEditorPointer event = pending[i];
-        if ((event.phase == BWEditorPointerDown) == self.pressed || !isfinite(event.x) || !isfinite(event.y)) continue;
+        BWEditorInput event = pending[i];
+        if (event.phase >= BWEditorKeyDown && event.phase <= BWEditorKeyFlags) {
+            if (event.textLength > BWEditorKeyTextCapacity || event.unmodifiedLength > BWEditorKeyTextCapacity) continue;
+            NSString *text = [NSString stringWithCharacters:event.text length:event.textLength];
+            NSString *plain = [NSString stringWithCharacters:event.unmodified length:event.unmodifiedLength];
+            if (BWDeliverDetachedEditorKey(editor, event.phase, event.keyCode, event.modifiers, text, plain, event.repeat)) {
+                if (event.held) self.heldKeys[@(event.keyCode)] = @(event.phase);
+                else [self.heldKeys removeObjectForKey:@(event.keyCode)];
+            }
+            continue;
+        }
+        BOOL begins = event.phase == BWEditorPointerDown || event.phase == BWEditorSecondaryDown;
+        if (begins == (self.pointerRelease != 0) || !isfinite(event.x) || !isfinite(event.y)) continue;
+        uint8_t expectedMove = self.pointerRelease == BWEditorSecondaryUp ? BWEditorSecondaryMove : BWEditorPointerMove;
+        if (!begins && event.phase != self.pointerRelease && event.phase != expectedMove) continue;
         CGPoint point = CGPointMake(event.x, event.y);
-        CGPoint delta = self.pressed ? CGPointMake(point.x - self.lastPoint.x, point.y - self.lastPoint.y) : CGPointZero;
+        CGPoint delta = self.pointerRelease ? CGPointMake(point.x - self.lastPoint.x, point.y - self.lastPoint.y) : CGPointZero;
         if (BWDeliverDetachedEditorPointer(editor, point, delta, event.phase)) {
-            self.pressed = event.phase != BWEditorPointerUp;
+            if (begins) self.pointerRelease = event.phase + 1;
+            else if (event.phase == self.pointerRelease) self.pointerRelease = 0;
             self.lastPoint = point;
         }
     }
     if (close) {
-        if (self.pressed) BWDeliverDetachedEditorPointer(editor, self.lastPoint, CGPointZero, BWEditorPointerUp);
-        self.pressed = NO;
+        [self releaseInput];
         self.close();
         return;
     }
@@ -149,6 +171,15 @@ static NSURL *surfaceDirectory(void) {
         [mapping unlock];
     }
 }
+- (void)releaseInput {
+    UIView *editor = self.parent.subviews.firstObject;
+    if (self.pointerRelease) BWDeliverDetachedEditorPointer(editor, self.lastPoint, CGPointZero, self.pointerRelease);
+    self.pointerRelease = 0;
+    for (NSNumber *key in self.heldKeys)
+        BWDeliverDetachedEditorKey(editor, self.heldKeys[key].integerValue == BWEditorKeyFlags ? BWEditorKeyFlags : BWEditorKeyUp,
+                                  key.unsignedShortValue, 0, @"", @"", NO);
+    [self.heldKeys removeAllObjects];
+}
 - (void)dealloc { if (_bitmap) CGContextRelease(_bitmap); }
 @end
 
@@ -164,6 +195,7 @@ id BWPublishDetachedEditor(UIView *parent, dispatch_block_t close) {
     publisher.parent = parent;
     publisher.mapping = mapping;
     publisher.close = close;
+    publisher.heldKeys = [NSMutableDictionary new];
     __weak BWEditorPublisher *weakPublisher = publisher;
     publisher.timer = [NSTimer timerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *timer) {
         BWEditorPublisher *current = weakPublisher;
@@ -174,11 +206,12 @@ id BWPublishDetachedEditor(UIView *parent, dispatch_block_t close) {
 }
 
 void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
-    if (publisher.pressed)
-        BWDeliverDetachedEditorPointer(publisher.parent.subviews.firstObject, publisher.lastPoint, CGPointZero, BWEditorPointerUp);
+    [publisher releaseInput];
     [publisher.timer invalidate];
     if ([publisher.mapping lock]) {
         publisher.mapping.surface->visible = 0;
+        memset(publisher.mapping.surface->pointers, 0, sizeof(publisher.mapping.surface->pointers));
+        publisher.mapping.surface->pointerCount = 0;
         [publisher.mapping unlock];
     }
     publisher.mapping = nil;
@@ -190,6 +223,8 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
 @property(nonatomic, strong) UIButton *closeButton;
 @property(nonatomic, strong) NSMutableArray<NSValue *> *pending;
 @property(nonatomic, strong) UITouch *contact;
+@property(nonatomic) BOOL secondary;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *heldKeys;
 @property(nonatomic) uint64_t sequence;
 @property(nonatomic) CGSize editorSize;
 @property(nonatomic) BOOL closing;
@@ -202,6 +237,7 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
     self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.9];
     self.pending = [NSMutableArray new];
+    self.heldKeys = [NSMutableDictionary new];
     self.image = [UIImageView new];
     [self addSubview:self.image];
     self.closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -224,34 +260,108 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
                                   CGRectGetMidY(available) - display.height / 2, display.width, display.height);
 }
 - (void)requestClose { self.closing = YES; }
+- (BOOL)canBecomeFirstResponder { return YES; }
+- (NSUInteger)pendingWithReleases { return self.pending.count + self.heldKeys.count + (self.contact != nil); }
+- (void)enqueue:(BWEditorInput)input {
+    [self.pending addObject:[NSValue valueWithBytes:&input objCType:@encode(BWEditorInput)]];
+}
 - (void)send:(UITouch *)touch phase:(uint8_t)phase {
     if (self.closing || CGRectIsEmpty(self.image.bounds)) return;
     CGPoint position = [touch locationInView:self.image];
-    BWEditorPointer event = {.x = position.x * self.editorSize.width / self.image.bounds.size.width,
-                             .y = position.y * self.editorSize.height / self.image.bounds.size.height, .phase = phase};
-    BWEditorPointer last = {0};
+    BWEditorInput event = {.x = position.x * self.editorSize.width / self.image.bounds.size.width,
+                           .y = position.y * self.editorSize.height / self.image.bounds.size.height, .phase = phase};
+    BWEditorInput last = {0};
     [self.pending.lastObject getValue:&last size:sizeof(last)];
-    if (phase == BWEditorPointerMove && last.phase == BWEditorPointerMove) [self.pending removeLastObject];
-    if (phase == BWEditorPointerMove && self.pending.count >= BWEditorPointerCapacity - 1) return;
-    [self.pending addObject:[NSValue valueWithBytes:&event objCType:@encode(BWEditorPointer)]];
+    if (isMove(phase) && last.phase == phase) [self.pending removeLastObject];
+    if (isMove(phase) && self.pendingWithReleases >= BWEditorPointerCapacity) return;
+    [self enqueue:event];
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     UITouch *touch = touches.anyObject;
-    if (self.contact || self.pending.count >= BWEditorPointerCapacity - 1 ||
+    if (self.contact || self.pendingWithReleases > BWEditorPointerCapacity - 2 ||
         !CGRectContainsPoint(self.image.frame, [touch locationInView:self])) return;
     self.contact = touch;
-    [self send:touch phase:BWEditorPointerDown];
+    self.secondary = touch.type == UITouchTypeIndirectPointer &&
+        (event.buttonMask & UIEventButtonMaskSecondary) && !(event.buttonMask & UIEventButtonMaskPrimary);
+    [self send:touch phase:self.secondary ? BWEditorSecondaryDown : BWEditorPointerDown];
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    if (self.contact && [touches containsObject:self.contact]) [self send:self.contact phase:BWEditorPointerMove];
+    if (self.contact && [touches containsObject:self.contact])
+        [self send:self.contact phase:self.secondary ? BWEditorSecondaryMove : BWEditorPointerMove];
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     if (!self.contact || ![touches containsObject:self.contact]) return;
-    [self send:self.contact phase:BWEditorPointerUp];
+    [self send:self.contact phase:self.secondary ? BWEditorSecondaryUp : BWEditorPointerUp];
     self.contact = nil;
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     [self touchesEnded:touches withEvent:event];
+}
+- (void)sendKeyboard:(NSSet<UIPress *> *)presses down:(BOOL)down {
+    if (self.closing) return;
+    for (UIPress *press in presses) {
+        UIKey *key = press.key;
+        if (!key) continue;
+        NSInteger keyCode = BWMacVirtualKey(key.keyCode);
+        if (keyCode < 0) continue;
+        NSNumber *identity = @(key.keyCode);
+        NSValue *held = self.heldKeys[identity];
+        BOOL caps = key.keyCode == UIKeyboardHIDUsageKeyboardCapsLock;
+        if (!down && !held && !caps) continue;
+        NSUInteger reserve = down && !held && !caps ? 2 : (down || caps ? 1 : 0);
+        if (self.pendingWithReleases + reserve > BWEditorPointerCapacity) continue;
+
+        NSUInteger modifier = BWKeyModifier(key.keyCode);
+        BOOL flagsChanged = modifier || caps;
+        NSUInteger flags = key.modifierFlags;
+        if (modifier) {
+            flags &= ~modifier;
+            if (down) flags |= modifier;
+            for (NSNumber *other in self.heldKeys)
+                if (![other isEqual:identity]) flags |= BWKeyModifier(other.integerValue);
+        }
+        BWEditorInput input = {.phase = flagsChanged ? BWEditorKeyFlags : (down ? BWEditorKeyDown : BWEditorKeyUp),
+            .keyCode = (uint16_t)keyCode, .modifiers = (uint32_t)flags, .repeat = down && held && !flagsChanged,
+            .held = down && !caps};
+        NSString *text = flagsChanged ? @"" : key.characters;
+        NSString *plain = flagsChanged ? @"" : key.charactersIgnoringModifiers;
+        if (key.keyCode == UIKeyboardHIDUsageKeyboardDeleteOrBackspace) text = plain = @"\177";
+        if (text.length <= BWEditorKeyTextCapacity) {
+            input.textLength = (uint8_t)text.length;
+            [text getCharacters:input.text range:NSMakeRange(0, text.length)];
+        }
+        if (plain.length <= BWEditorKeyTextCapacity) {
+            input.unmodifiedLength = (uint8_t)plain.length;
+            [plain getCharacters:input.unmodified range:NSMakeRange(0, plain.length)];
+        }
+        [self enqueue:input];
+        if (input.held) self.heldKeys[identity] = self.pending.lastObject;
+        else [self.heldKeys removeObjectForKey:identity];
+    }
+}
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    [self sendKeyboard:presses down:YES];
+}
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    [self sendKeyboard:presses down:NO];
+}
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    [self sendKeyboard:presses down:NO];
+}
+- (BOOL)resignFirstResponder {
+    BOOL resigned = [super resignFirstResponder];
+    if (!resigned || self.closing) return resigned;
+    for (NSValue *value in self.heldKeys.allValues) {
+        BWEditorInput input;
+        [value getValue:&input size:sizeof(input)];
+        if (input.phase == BWEditorKeyDown) input.phase = BWEditorKeyUp;
+        input.held = 0;
+        input.repeat = 0;
+        input.modifiers &= UIKeyModifierAlphaShift;
+        [self enqueue:input];
+    }
+    [self.heldKeys removeAllObjects];
+    return YES;
 }
 - (BOOL)refresh {
     if (![self.mapping lock]) return YES;
@@ -266,7 +376,7 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
     uint8_t count = 0;
     while (surface->pointerCount < BWEditorPointerCapacity && count < self.pending.count) {
         NSUInteger index = (surface->pointerRead + surface->pointerCount++) % BWEditorPointerCapacity;
-        [self.pending[count++] getValue:&surface->pointers[index] size:sizeof(BWEditorPointer)];
+        [self.pending[count++] getValue:&surface->pointers[index] size:sizeof(BWEditorInput)];
     }
     if (count) [self.pending removeObjectsInRange:NSMakeRange(0, count)];
     if (self.sequence == surface->sequence || !surface->width || surface->width > BWEditorMaxWidth ||
@@ -304,8 +414,15 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
     for (NSURL *url in viewports.allKeys) {
         BWEditorViewport *viewport = viewports[url];
         if ([viewport refresh]) continue;
+        UIView *host = viewport.superview;
+        BOOL focused = viewport.isFirstResponder;
         [viewport removeFromSuperview];
         [viewports removeObjectForKey:url];
+        if (focused) {
+            BWEditorViewport *next = viewports.allValues.lastObject;
+            if (next) [next becomeFirstResponder];
+            else [host becomeFirstResponder];
+        }
     }
     UIView *host = scene.keyWindow.rootViewController.view;
     NSURL *directory = surfaceDirectory();
@@ -332,6 +449,7 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
         viewport.mapping = mapping;
         if (![viewport refresh]) continue;
         [host addSubview:viewport];
+        [viewport becomeFirstResponder];
         viewports[url] = viewport;
     }
 }
