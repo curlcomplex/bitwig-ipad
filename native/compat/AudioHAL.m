@@ -17,6 +17,10 @@ static BWAudioRing *sharedAudio;
 static NSLock *routeLock;
 static NSURL *routeFile;
 static uint64_t cachedGeneration;
+static _Thread_local struct {
+    UInt32 scope, size;
+    uint64_t generation;
+} directionalStreamQuery;
 @interface BWAudioRoute:NSObject
 @property NSDictionary *info;
 @end
@@ -158,10 +162,26 @@ static void *coreSymbol(const char *name){static void *handle;static dispatch_on
 static void missing(const char *operation,AudioObjectID object,const AudioObjectPropertyAddress *address){UInt32 s=address->mSelector;fprintf(stderr,"[native audio] unsupported %s object=%08x selector=%c%c%c%c scope=%08x element=%u\n",operation,object,(s>>24)&255,(s>>16)&255,(s>>8)&255,s&255,address->mScope,address->mElement);}
 Boolean AudioObjectHasProperty(AudioObjectID object,const AudioObjectPropertyAddress *address){if(ours(object))return property(object,address,0,NULL,NO)!=nil;return ((Boolean(*)(AudioObjectID,const AudioObjectPropertyAddress*))coreSymbol("AudioObjectHasProperty"))(object,address);}
 OSStatus AudioObjectGetPropertyDataSize(AudioObjectID object,const AudioObjectPropertyAddress *address,UInt32 qualifierSize,const void *qualifier,UInt32 *size){
-    if(ours(object)){NSData *value=property(object,address,qualifierSize,qualifier,NO);if(!value){missing("size",object,address);return kAudioHardwareUnknownPropertyError;}*size=(UInt32)value.length;return noErr;}
+    directionalStreamQuery.scope = 0;
+    if (ours(object)) {
+        uint64_t generation = routeGeneration();
+        NSData *value = property(object,address,qualifierSize,qualifier,NO);
+        if (!value) { missing("size", object, address); return kAudioHardwareUnknownPropertyError; }
+        *size = (UInt32)value.length;
+        if (object == BWDevice && address->mSelector == kAudioDevicePropertyStreams &&
+            (address->mScope == kAudioObjectPropertyScopeInput || address->mScope == kAudioObjectPropertyScopeOutput) &&
+            generation && !(generation & 1) && generation == routeGeneration()) {
+            directionalStreamQuery.scope = address->mScope;
+            directionalStreamQuery.size = *size;
+            directionalStreamQuery.generation = generation;
+        }
+        return noErr;
+    }
     return ((OSStatus(*)(AudioObjectID,const AudioObjectPropertyAddress*,UInt32,const void*,UInt32*))coreSymbol("AudioObjectGetPropertyDataSize"))(object,address,qualifierSize,qualifier,size);
 }
 OSStatus AudioObjectGetPropertyData(AudioObjectID object,const AudioObjectPropertyAddress *address,UInt32 qualifierSize,const void *qualifier,UInt32 *size,void *data){
+    __typeof__(directionalStreamQuery) previous = directionalStreamQuery;
+    directionalStreamQuery.scope = 0;
     if(object==BWSystem&&address->mSelector=='pibi'){
         typedef struct {void *input;UInt32 inputSize;void *output;UInt32 outputSize;} Translation;
         if(*size!=sizeof(Translation))return kAudioHardwareBadPropertySizeError;
@@ -170,7 +190,28 @@ OSStatus AudioObjectGetPropertyData(AudioObjectID object,const AudioObjectProper
         fprintf(stdout,"[native audio] legacy HAL lookup %s\n",bundle.UTF8String);
         *(UInt32*)translation->output=session()&&[bundle isEqualToString:@"com.apple.audio.CoreAudio"]?BWPlugin:0;return noErr;
     }
-    if(ours(object)){NSData *value=property(object,address,qualifierSize,qualifier,NO);if(!value){missing("get",object,address);return kAudioHardwareUnknownPropertyError;}if(*size<value.length)return kAudioHardwareBadPropertySizeError;value=property(object,address,qualifierSize,qualifier,YES);if(!value||*size<value.length)return kAudioHardwareBadPropertySizeError;memcpy(data,value.bytes,value.length);*size=(UInt32)value.length;return noErr;}
+    if (ours(object)) {
+        NSData *value = property(object,address,qualifierSize,qualifier,NO);
+        AudioObjectPropertyAddress scoped = *address;
+        if (object == BWDevice && address->mSelector == kAudioObjectPropertyOwnedObjects &&
+            address->mScope == kAudioObjectPropertyScopeGlobal && address->mElement == kAudioObjectPropertyElementMain &&
+            !qualifierSize && previous.scope && previous.size == *size && *size < value.length &&
+            previous.generation == routeGeneration()) {
+            // Bitwig sizes this particular read with the directional stream
+            // selector, then fetches with the global owned-object address.
+            scoped.mSelector = kAudioDevicePropertyStreams;
+            scoped.mScope = previous.scope;
+            address = &scoped;
+            value = property(object,address,qualifierSize,qualifier,NO);
+        }
+        if (!value) { missing("get", object, address); return kAudioHardwareUnknownPropertyError; }
+        if (*size < value.length) { missing("get size", object, address); return kAudioHardwareBadPropertySizeError; }
+        value = property(object,address,qualifierSize,qualifier,YES);
+        if (!value || *size < value.length) return kAudioHardwareBadPropertySizeError;
+        if (value.length) memcpy(data, value.bytes, value.length);
+        *size = (UInt32)value.length;
+        return noErr;
+    }
     return ((OSStatus(*)(AudioObjectID,const AudioObjectPropertyAddress*,UInt32,const void*,UInt32*,void*))coreSymbol("AudioObjectGetPropertyData"))(object,address,qualifierSize,qualifier,size,data);
 }
 OSStatus AudioObjectIsPropertySettable(AudioObjectID object,const AudioObjectPropertyAddress *address,Boolean *settable){if(ours(object)){if(!property(object,address,0,NULL,NO))return kAudioHardwareUnknownPropertyError;*settable=object==BWDevice&&(address->mSelector==kAudioDevicePropertyNominalSampleRate||address->mSelector=='fsiz');return noErr;}return ((OSStatus(*)(AudioObjectID,const AudioObjectPropertyAddress*,Boolean*))coreSymbol("AudioObjectIsPropertySettable"))(object,address,settable);}
