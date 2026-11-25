@@ -1558,15 +1558,90 @@ void BWUIKitPollTestInput(void) {
     [encoded writeToFile:[documents stringByAppendingPathComponent:@"native-ui-result.json"] atomically:YES];
 }
 
-// Save selection remains unsupported. The open panel shares this preference
-// with AppKit's save panel, although Files owns iOS directory-management UI.
+static NSURL *BWProjectSaveDirectory(NSURL *requested) {
+    NSURL *container=BWSharedContainerURL();
+    if(!container)container=[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *user=[container URLByAppendingPathComponent:@"BitwigUser" isDirectory:YES];
+    NSURL *projects=[user URLByAppendingPathComponent:@"Projects" isDirectory:YES];
+    if(!requested.isFileURL)return projects;
+    NSString *root=user.URLByResolvingSymlinksInPath.path;
+    NSString *path=requested.URLByResolvingSymlinksInPath.path;
+    if([path isEqualToString:root]||[path hasPrefix:[root stringByAppendingString:@"/"]])return requested;
+    return projects;
+}
+
 @interface NSSavePanel : NSPanel
-@property(nonatomic) BOOL canCreateDirectories;
+@property(nonatomic) BOOL canCreateDirectories,canSelectHiddenExtension,floatingPanel,allowsOtherFileTypes;
+@property(nonatomic,copy) NSArray<NSString*> *allowedFileTypes;
+@property(nonatomic,copy) NSString *nameFieldStringValue;
+@property(nonatomic,strong) NSURL *directoryURL;
+@property(nonatomic,strong,readonly) NSURL *URL;
 @end
 @implementation NSSavePanel
 - (instancetype)init {
     if((self=[super init])) _canCreateDirectories=YES;
     return self;
+}
++ (instancetype)savePanel { return [self new]; }
+- (void)beginWithCompletionHandler:(void(^)(NSInteger))completion {
+    NSWindow *window=[NSApp keyWindow];
+    UIViewController *presenter=window.uiWindow.rootViewController;
+    while(presenter.presentedViewController)presenter=presenter.presentedViewController;
+    NSURL *directory=BWProjectSaveDirectory(self.directoryURL);
+    if(!presenter||!directory){completion(0);return;}
+    NSError *error=nil;
+    if(![NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:&error]){
+        UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Could not open save location" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action){completion(0);}]];
+        [presenter presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    NSString *location=directory.lastPathComponent;
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:self.title.length?self.title:@"Save"
+        message:location preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field){
+        field.text=self.nameFieldStringValue;
+        field.clearButtonMode=UITextFieldViewModeWhileEditing;
+    }];
+    UITextField *field=alert.textFields.firstObject;
+    __weak UIAlertController *weakAlert=alert;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action){completion(0);}]];
+    void (^accept)(UIAlertAction *)=^(__unused UIAlertAction *action){
+        NSString *name=[weakAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        self.nameFieldStringValue=name;
+        id delegate=self.delegate;
+        SEL selector=@selector(panel:userEnteredFilename:confirmed:);
+        if([delegate respondsToSelector:selector])
+            name=((NSString*(*)(id,SEL,id,NSString*,BOOL))objc_msgSend)(delegate,selector,self,name,YES);
+        if(name.length)_URL=[directory URLByAppendingPathComponent:name isDirectory:NO];
+        completion(_URL?1:0);
+    };
+    UIAlertAction *save=[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:accept];
+    UIAlertAction *replace=[UIAlertAction actionWithTitle:@"Replace Existing Project" style:UIAlertActionStyleDestructive handler:accept];
+    [alert addAction:save];
+    [alert addAction:replace];
+    __weak UIAlertAction *weakSave=save;
+    __weak UIAlertAction *weakReplace=replace;
+    void (^validate)(void)=^{
+        UIAlertController *active=weakAlert;
+        NSString *name=[active.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        BOOL valid=name.length&&![name isEqualToString:@"."]&&![name isEqualToString:@".."]&&
+            [name rangeOfString:@"/"].location==NSNotFound;
+        BOOL exists=NO;
+        if(valid){
+            // Bitwig may append the project extension after the native panel returns.
+            NSURL *item=[directory URLByAppendingPathComponent:name];
+            NSURL *project=[directory URLByAppendingPathComponent:[name stringByAppendingPathExtension:@"bwproject"]];
+            exists=[NSFileManager.defaultManager fileExistsAtPath:item.path]||
+                [NSFileManager.defaultManager fileExistsAtPath:project.path];
+        }
+        active.message=exists?[NSString stringWithFormat:@"A project with this name already exists in %@.",location]:location;
+        weakSave.enabled=valid&&!exists;
+        weakReplace.enabled=exists;
+    };
+    [field addAction:[UIAction actionWithHandler:^(__unused UIAction *action){validate();}] forControlEvents:UIControlEventEditingChanged];
+    validate();
+    [presenter presentViewController:alert animated:YES completion:nil];
 }
 @end
 
@@ -1574,10 +1649,7 @@ void BWUIKitPollTestInput(void) {
 // Native asynchronous Files picker. Imported files live in the shared container
 // so both the frontend and the sandboxed audio engine can read them.
 @interface NSOpenPanel : NSSavePanel <UIDocumentPickerDelegate>
-@property BOOL allowsMultipleSelection,canChooseDirectories,canChooseFiles,allowsOtherFileTypes,canSelectHiddenExtension,floatingPanel;
-@property(copy) NSArray<NSString*> *allowedFileTypes;
-@property(copy) NSString *nameFieldStringValue;
-@property(strong) NSURL *directoryURL;
+@property BOOL allowsMultipleSelection,canChooseDirectories,canChooseFiles;
 @property(copy) NSArray<NSURL*> *URLs;
 @property(copy) void (^completion)(NSInteger);
 @property(strong) UIDocumentPickerViewController *picker;
