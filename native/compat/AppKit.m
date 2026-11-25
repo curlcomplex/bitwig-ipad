@@ -310,9 +310,29 @@ static BOOL BWIsDetachedEditor(UIView *view) {
 #endif
 }
 
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_JUCE_EDITOR
 static BOOL BWIsEngineExtension(void) {
     NSDictionary *extension = [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSExtension"];
     return [extension[@"NSExtensionPrincipalClass"] isEqualToString:@"NativeEngineHandler"];
+}
+#endif
+#if BW_JUCE_EDITOR
+extern id BWAttachJucePopup(UIView *view, CGRect *frame);
+extern CGRect BWUpdateJucePopupFrame(id popup, CGRect frame);
+extern void BWDetachJucePopup(id popup);
+
+static CGRect BWFlipJucePopupFrame(CGRect frame) {
+    frame.origin.y = CGRectGetMaxY(NSScreen.mainScreen.frame) - CGRectGetMaxY(frame);
+    return frame;
+}
+
+void BWSetDetachedJuceCursor(CGPoint point) {
+    mouseScreenLocation = CGPointMake(point.x, CGRectGetMaxY(NSScreen.mainScreen.frame) - point.y);
+}
+
+void BWClearDetachedJuceButton(BOOL secondary) {
+    pressedMouseButtons &= ~(secondary ? 2UL : 1UL);
 }
 #endif
 
@@ -321,6 +341,7 @@ static BOOL BWIsEngineExtension(void) {
 @property(nonatomic) NSUInteger focusRingType;
 @property(nonatomic, copy) NSArray<NSString *> *registeredDraggedTypes;
 @property(nonatomic) BOOL wantsLayer;
+@property(nonatomic,strong) id appearance;
 @property(nonatomic) NSInteger layerContentsRedrawPolicy;
 @property(nonatomic) NSInteger layerContentsPlacement;
 @property(nonatomic,strong) NSMutableArray<NSTrackingArea*> *tracking;
@@ -349,6 +370,11 @@ static BOOL BWIsEngineExtension(void) {
 - (void)keyUp:(NSEvent *)event {}
 @end
 #endif
+static void BWForwardCocoaResponderEvent(UIView *view, SEL selector, NSEvent *event) {
+    UIResponder *next = view.nextResponder;
+    if ([next respondsToSelector:selector]) ((void (*)(id, SEL, id))objc_msgSend)(next, selector, event);
+}
+
 @implementation NSView {
     CGRect _drawingRect;
 }
@@ -409,6 +435,14 @@ BW_TRACE_MISSING_SELECTOR
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstResponder { return self.canBecomeFirstResponder; }
 - (void)viewDidMoveToWindow {}
+// AppKit peers call super for events they do not handle. UIKit's
+// responder chain has no Cocoa mouse/key defaults of its own.
+- (void)keyDown:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+- (void)keyUp:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+#if BW_VSTGUI_EDITOR
+- (void)rightMouseDown:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+- (void)rightMouseUp:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+#endif
 - (void)getRectsBeingDrawn:(const CGRect **)rects count:(NSInteger *)count {
     CGContextRef context = UIGraphicsGetCurrentContext();
     _drawingRect = context ? CGRectIntersection(self.bounds, CGContextGetClipBoundingBox(context)) : self.bounds;
@@ -1047,6 +1081,7 @@ static UIView *BWDetachedEditorChild(UIView *view) {
 @interface NSWindow : NSObject <BWSceneWindow>
 @property(nonatomic,strong) UIWindow *uiWindow;
 @property(nonatomic,strong) NSView *contentView;
+@property(nonatomic,strong) id colorSpace;
 @property(nonatomic,weak) id delegate;
 @property(nonatomic,copy) NSString *title;
 @property(nonatomic) BOOL releasedWhenClosed;
@@ -1064,6 +1099,9 @@ static UIView *BWDetachedEditorChild(UIView *view) {
 @property(nonatomic) CGRect requestedFrame;
 @property(nonatomic) BOOL requestedFullScene;
 @property(nonatomic) BOOL hasBeenShown;
+#if BW_JUCE_EDITOR
+@property(nonatomic, strong) id detachedJucePopup;
+#endif
 #if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
 @property(nonatomic, strong) id detachedEditorPublisher;
 #endif
@@ -1077,6 +1115,9 @@ static UIView *BWDetachedEditorChild(UIView *view) {
 @property(nonatomic) BOOL showsResizeIndicator;
 @property(nonatomic) BOOL ignoresMouseEvents;
 @property(nonatomic) BOOL hidesOnDeactivate;
+@property(nonatomic) BOOL excludedFromWindowsMenu;
+@property(nonatomic) BOOL restorable;
+@property(nonatomic) NSInteger tabbingMode;
 @property(nonatomic) BOOL allowsToolTipsWhenApplicationIsInactive;
 @property(nonatomic) NSInteger titleVisibility;
 @property(nonatomic) NSUInteger sharingType;
@@ -1150,6 +1191,7 @@ BW_TRACE_MISSING_SELECTOR
     self.uiWindow.backgroundColor=[UIColor colorWithCGColor:cg];
 }
 - (void)setOpaque:(BOOL)opaque { self.uiWindow.opaque=opaque; }
+- (void)setAccessibilityElement:(BOOL)accessible { self.uiWindow.isAccessibilityElement=accessible; }
 - (void)setIgnoresMouseEvents:(BOOL)ignoresMouseEvents {
     _ignoresMouseEvents = ignoresMouseEvents;
     self.uiWindow.userInteractionEnabled = !ignoresMouseEvents;
@@ -1206,7 +1248,14 @@ BW_TRACE_MISSING_SELECTOR
 
 - (void)updateDesktopFrame:(CGRect)frame display:(BOOL)display {
     CGRect previous=self.desktopFrame;
+#if BW_JUCE_EDITOR
+    if (self.detachedJucePopup)
+        frame = BWFlipJucePopupFrame(BWUpdateJucePopupFrame(self.detachedJucePopup, BWFlipJucePopupFrame(frame)));
+#endif
     [self applyDesktopFrame:frame];
+#if BW_JUCE_EDITOR
+    if (self.detachedJucePopup) self.contentView.frame = (CGRect){CGPointZero, frame.size};
+#endif
     if(display) [self.uiWindow layoutIfNeeded];
     if(!CGPointEqualToPoint(previous.origin,frame.origin)&&[self.delegate respondsToSelector:@selector(windowDidMove:)])
         ((void(*)(id,SEL,id))objc_msgSend)(self.delegate,@selector(windowDidMove:),[NSNotification notificationWithName:@"NSWindowDidMoveNotification" object:self]);
@@ -1238,8 +1287,28 @@ BW_TRACE_MISSING_SELECTOR
     self.detachedEditorPublisher = nil;
 }
 #endif
+#if BW_JUCE_EDITOR
+- (BOOL)publishDetachedJucePopup {
+    if (self.detachedJucePopup) return YES;
+    if (!self.excludedFromWindowsMenu || self.uiWindow.windowScene || !BWIsEngineExtension() ||
+        ![NSStringFromClass(self.class) hasPrefix:@"JUCEWindow_"]) return NO;
+    CGRect frame = BWFlipJucePopupFrame(self.desktopFrame);
+    self.detachedJucePopup = BWAttachJucePopup(self.contentView, &frame);
+    if (!self.detachedJucePopup) return NO;
+    self.uiWindow.rootViewController.view = [UIView new];
+    [self updateDesktopFrame:BWFlipJucePopupFrame(frame) display:NO];
+    return YES;
+}
+- (void)stopPublishingDetachedJucePopup {
+    BWDetachJucePopup(self.detachedJucePopup);
+    self.detachedJucePopup = nil;
+}
+#endif
 - (void)makeKeyAndOrderFront:(id)sender {
     self.hasBeenShown=YES;
+#if BW_JUCE_EDITOR
+    if ([self publishDetachedJucePopup]) return;
+#endif
 #if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
     if ([self publishDetachedEditor]) return;
 #endif
@@ -1249,6 +1318,9 @@ BW_TRACE_MISSING_SELECTOR
 }
 - (void)orderFront:(id)sender {
     self.hasBeenShown=YES;
+#if BW_JUCE_EDITOR
+    if ([self publishDetachedJucePopup]) return;
+#endif
 #if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
     if ([self publishDetachedEditor]) return;
 #endif
@@ -1256,12 +1328,18 @@ BW_TRACE_MISSING_SELECTOR
 }
 - (void)orderFrontRegardless { [self orderFront:nil]; }
 - (void)orderOut:(id)sender {
+#if BW_JUCE_EDITOR
+    [self stopPublishingDetachedJucePopup];
+#endif
 #if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
     [self stopPublishingDetachedEditor];
 #endif
     self.uiWindow.hidden=YES;
 }
 - (void)close {
+#if BW_JUCE_EDITOR
+    [self stopPublishingDetachedJucePopup];
+#endif
 #if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
     [self stopPublishingDetachedEditor];
 #endif
@@ -1274,6 +1352,9 @@ BW_TRACE_MISSING_SELECTOR
     [self close];
 }
 - (BOOL)isVisible {
+#if BW_JUCE_EDITOR
+    if (self.detachedJucePopup) return YES;
+#endif
 #if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
     if (self.detachedEditorPublisher) return YES;
 #endif

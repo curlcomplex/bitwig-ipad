@@ -1,4 +1,5 @@
 #include <clap/clap.h>
+#include <dispatch/dispatch.h>
 #include <mach/mach.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -208,8 +209,39 @@ static void CLAP_ABI destroyPlugin(const clap_plugin_t *plugin) {
 }
 #endif
 
+static bool isPinnedSurge(const clap_plugin_t *plugin) {
+    const clap_plugin_descriptor_t *descriptor = plugin->desc;
+    return descriptor && descriptor->id && descriptor->version &&
+        !strcmp(descriptor->id, "org.surge-synth-team.surge-xt") && !strcmp(descriptor->version, "1.3.4");
+}
+
+static bool isSurgeMacro(clap_id id) {
+    // Stable IDs for macro_0 through macro_7 in the pinned CLAP descriptor.
+    return id >= 0x3135e47d && id <= 0x3135e484;
+}
+
+static bool CLAP_ABI surgeMacroValueToText(const clap_plugin_t *plugin, clap_id id, double value,
+                                         char *display, uint32_t size) {
+    const clap_plugin_params_t *params = atomic_load(&originalExtension)(plugin, CLAP_EXT_PARAMS);
+    // Surge 1.3.4 formats the smoothed modulation output, ignoring the
+    // requested target value. Keep its six decimals and format the target.
+    // Like Surge, report success for a bounded result in a short buffer.
+    if (display && size && value >= 0 && value <= 1 && isSurgeMacro(id))
+        return snprintf(display, size, "%.6f", (double)(float)value) >= 0;
+    return params->value_to_text(plugin, id, value, display, size);
+}
+
 static const void *CLAP_ABI extension(const clap_plugin_t *plugin, const char *id) {
     const void *original = atomic_load(&originalExtension)(plugin, id);
+    if (original && !strcmp(id, CLAP_EXT_PARAMS) && isPinnedSurge(plugin)) {
+        static clap_plugin_params_t params;
+        static dispatch_once_t paramsOnce;
+        dispatch_once(&paramsOnce, ^{
+            params = *(const clap_plugin_params_t *)original;
+            params.value_to_text = surgeMacroValueToText;
+        });
+        return &params;
+    }
     if (!original || strcmp(id, CLAP_EXT_GUI)) return original;
 
     // Calls on this path are main-thread only. Copy the original table once

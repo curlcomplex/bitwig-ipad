@@ -83,6 +83,7 @@ run(*CC,'-fno-objc-arc','-c',ROOT/'native/compat/Metal.m','-o',BUILD/'Metal.o')
 compat_sources = [ROOT/'native/compat/AppKit.m', ROOT/'native/compat/DesktopServices.m']
 if args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3: compat_sources.append(ROOT/'native/compat/surge/EditorSurface.m')
 compat_defines = ['-DBW_VSTGUI_EDITOR=1'] if args.ott_vst3 else []
+if args.surge_editor_clap_include: compat_defines.append('-DBW_JUCE_EDITOR=1')
 if args.nam_vst3:
     compat_sources += [ROOT/'native/compat/nam'/name for name in ('Layer.m', 'Capture.m')]
     compat_defines.append('-DBW_IPLUG_EDITOR=1')
