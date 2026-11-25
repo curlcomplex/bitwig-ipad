@@ -231,7 +231,7 @@ def stage_surge(source, lib, sdk, cc, native, device, *, editor_headers=None, ch
             chow_entry = lib.parent / 'CHOWEditorEntry.o'
             invoke(*cc, '-fobjc-arc', '-c', surge / 'EditorEntry.m', '-I', editor_headers,
                    '-DBW_SURGE_REMOTE=1', '-DBWRemoteEditor=BWCHOWRemoteEditor',
-                   '-DBWEditorEntry=BWCHOWEditorEntry', '-o', chow_entry)
+                   '-DBWEditorEntry=BWCHOWEditorEntry', '-DBW_EDITOR_NAME="CHOW"', '-o', chow_entry)
             sources.append(chow_entry)
             options.append('-DBW_CHOW_EDITOR=1')
         invoke(*cc, '-fobjc-arc', '-dynamiclib', *sources, *options,

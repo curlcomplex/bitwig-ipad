@@ -51,7 +51,7 @@ def main():
         editor_sources = [ROOT / 'native/compat/surge/EditorEntry.m'] if editor else []
         defines = ['-DSURGE_EDITOR'] if editor else ['-DSURGE_HEADLESS']
         if args.chow_editor:
-            defines.append('-DCHOW_EDITOR')
+            defines += ['-DCHOW_EDITOR', '-DBW_EDITOR_NAME="CHOW"']
         run(*cc, '-fobjc-arc', *defines, '-I', args.clap_include,
             ROOT / 'tests/surge-clap-probe.m', ROOT / 'tests/surge-clap-probe.c',
             *editor_sources,
@@ -68,7 +68,7 @@ def main():
             output = captured.stdout + captured.stderr
             print(output, end='')
             if args.chow_editor:
-                required = ('CHOW_EDITOR_PASS',)
+                required = ('CHOW editor create cocoa floating=0', 'CHOW_EDITOR_PASS')
             else:
                 mode = 'SURGE_EDITOR_PASS' if args.editor else 'SURGE_HEADLESS gui unavailable'
                 required = ('SURGE_DESCRIPTOR', mode, 'SURGE_PARAMS ',
