@@ -1,4 +1,7 @@
 #import <UIKit/UIKit.h>
+#if BW_JUCE_EDITOR
+#import <objc/runtime.h>
+#endif
 #import "../LocalConfiguration.h"
 #import "../HardwareKeys.h"
 #import "EditorSurface.h"
@@ -82,10 +85,28 @@ static void removeDocumentExchange(BWEditorMapping *mapping) {
 }
 #endif
 
+#if BW_JUCE_EDITOR
+@class BWEditorPublisher;
+@interface BWJucePopup : NSObject
+@property(nonatomic, weak) BWEditorPublisher *publisher;
+@property(nonatomic, strong) UIView *view;
+@property(nonatomic) CGRect frame;
+@end
+@implementation BWJucePopup
+@end
+#endif
+
 @interface BWEditorPublisher : NSObject
 @property(nonatomic, strong) BWEditorMapping *mapping;
 @property(nonatomic, strong) UIView *parent;
 @property(nonatomic, strong) UIView *view;
+@property(nonatomic, weak) UIView *focusedJuceView;
+#if BW_JUCE_EDITOR
+@property(nonatomic, strong) NSMutableArray<BWJucePopup *> *jucePopups;
+@property(nonatomic, weak) UIView *juceEditor;
+@property(nonatomic, weak) UIView *pointerView;
+@property(nonatomic) CGPoint pointerOrigin;
+#endif
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, copy) dispatch_block_t close;
 @property(nonatomic) CGPoint lastPoint;
@@ -127,6 +148,87 @@ BOOL BWNAMRequestOpenPanel(NSString *extension, void (^complete)(NSURL *)) {
     if (![extension writeToURL:request atomically:YES encoding:NSUTF8StringEncoding error:nil]) return NO;
     publisher.documentReply = complete;
     return YES;
+}
+#endif
+
+#if BW_JUCE_EDITOR
+extern void BWSetDetachedJuceCursor(CGPoint point);
+extern void BWClearDetachedJuceButton(BOOL secondary);
+static NSMapTable<UIView *, BWEditorPublisher *> *jucePublishers;
+static __weak BWEditorPublisher *juceInputPublisher;
+static char juceMouseDownImplementationKey;
+
+static BOOL isJuceView(UIView *view) {
+    return [NSStringFromClass(view.class) hasPrefix:@"JUCEView_"];
+}
+
+static void dispatchJuceMouseDown(UIView *view, SEL selector, id event) {
+    NSValue *stored = objc_getAssociatedObject(view.class, &juceMouseDownImplementationKey);
+    IMP original = (IMP)stored.pointerValue;
+    BWEditorPublisher *publisher = [jucePublishers objectForKey:view];
+    BWEditorPublisher *prior = juceInputPublisher;
+    juceInputPublisher = publisher.mapping ? publisher : nil;
+    @try { ((void (*)(id, SEL, id))original)(view, selector, event); }
+    @finally { juceInputPublisher = prior; }
+}
+
+static BOOL trackJuceView(UIView *view, BWEditorPublisher *publisher) {
+    if (!isJuceView(view)) return NO;
+    Class cls = view.class;
+    if (!objc_getAssociatedObject(cls, &juceMouseDownImplementationKey)) {
+        SEL selector = @selector(asyncMouseDown:);
+        Method method = class_getInstanceMethod(cls, selector);
+        if (!method) return NO;
+        IMP original = method_getImplementation(method);
+        objc_setAssociatedObject(cls, &juceMouseDownImplementationKey, [NSValue valueWithPointer:original], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!class_addMethod(cls, selector, (IMP)dispatchJuceMouseDown, method_getTypeEncoding(method)))
+            method_setImplementation(method, (IMP)dispatchJuceMouseDown);
+    }
+    if (!jucePublishers) jucePublishers = [NSMapTable weakToWeakObjectsMapTable];
+    [jucePublishers setObject:publisher forKey:view];
+    return YES;
+}
+
+static CGRect constrainJucePopupFrame(BWEditorPublisher *publisher, CGRect frame) {
+    // A detached menu has the editor surface as its visible desktop area.
+    CGRect bounds = publisher.juceEditor.bounds;
+    CGFloat maxX = MAX(CGRectGetMinX(bounds), CGRectGetMaxX(bounds) - CGRectGetWidth(frame));
+    CGFloat maxY = MAX(CGRectGetMinY(bounds), CGRectGetMaxY(bounds) - CGRectGetHeight(frame));
+    frame.origin.x = MIN(MAX(frame.origin.x, CGRectGetMinX(bounds)), maxX);
+    frame.origin.y = MIN(MAX(frame.origin.y, CGRectGetMinY(bounds)), maxY);
+    return frame;
+}
+
+id BWAttachJucePopup(UIView *view, CGRect *frame) {
+    BWEditorPublisher *publisher = juceInputPublisher;
+    if (!publisher.mapping || CGRectIsEmpty(*frame) || CGRectIsInfinite(*frame) ||
+        !trackJuceView(view, publisher)) return nil;
+    BWJucePopup *popup = [BWJucePopup new];
+    popup.publisher = publisher;
+    popup.view = view;
+    *frame = constrainJucePopupFrame(publisher, *frame);
+    popup.frame = *frame;
+    [publisher.jucePopups addObject:popup];
+    return popup;
+}
+
+CGRect BWUpdateJucePopupFrame(BWJucePopup *popup, CGRect frame) {
+    if (!CGRectIsEmpty(frame) && !CGRectIsInfinite(frame))
+        popup.frame = constrainJucePopupFrame(popup.publisher, frame);
+    return popup.frame;
+}
+
+void BWDetachJucePopup(BWJucePopup *popup) {
+    if (!popup) return;
+    BWEditorPublisher *publisher = popup.publisher;
+    if ([jucePublishers objectForKey:popup.view] == publisher) [jucePublishers removeObjectForKey:popup.view];
+    [publisher.jucePopups removeObjectIdenticalTo:popup];
+    if (publisher.pointerView == popup.view) {
+        if (publisher.pointerRelease) BWClearDetachedJuceButton(publisher.pointerRelease == BWEditorSecondaryUp);
+        publisher.pointerView = nil;
+        publisher.pointerRelease = 0;
+    }
+    popup.publisher = nil;
 }
 #endif
 
@@ -188,39 +290,104 @@ BOOL BWNAMRequestOpenPanel(NSString *extension, void (^complete)(NSURL *)) {
             if (self.mapping != mapping) return;
         }
     }
-    BWEditorPublisher *priorDispatch = editorDispatch;
-    editorDispatch = self;
 #endif
-    for (uint8_t i = 0; i < count; ++i) {
-        BWEditorInput event = pending[i];
-        if (event.phase >= BWEditorKeyDown && event.phase <= BWEditorKeyFlags) {
-            if (event.textLength > BWEditorKeyTextCapacity || event.unmodifiedLength > BWEditorKeyTextCapacity) continue;
-            NSString *text = [NSString stringWithCharacters:event.text length:event.textLength];
-            NSString *plain = [NSString stringWithCharacters:event.unmodified length:event.unmodifiedLength];
-            if (BWDeliverDetachedEditorKey(editor, event.phase, event.keyCode, event.modifiers, text, plain, event.repeat)) {
-                if (event.held) self.heldKeys[@(event.keyCode)] = @(event.phase);
-                else [self.heldKeys removeObjectForKey:@(event.keyCode)];
-            }
-            continue;
-        }
-        BOOL begins = event.phase == BWEditorPointerDown || event.phase == BWEditorSecondaryDown;
-        if (begins == (self.pointerRelease != 0) || !isfinite(event.x) || !isfinite(event.y)) continue;
-        uint8_t expectedMove = self.pointerRelease == BWEditorSecondaryUp ? BWEditorSecondaryMove : BWEditorPointerMove;
-        if (!begins && event.phase != self.pointerRelease && event.phase != expectedMove) continue;
-        CGPoint point = CGPointMake(event.x, event.y);
-        CGPoint delta = self.pointerRelease ? CGPointMake(point.x - self.lastPoint.x, point.y - self.lastPoint.y) : CGPointZero;
-        if (BWDeliverDetachedEditorPointerWithModifiers(editor, point, delta, event.phase, event.modifiers)) {
-            if (begins) self.pointerRelease = event.phase + 1;
-            else if (event.phase == self.pointerRelease) self.pointerRelease = 0;
-            self.lastPoint = point;
-        }
+    if (!close && count && !self.view && !self.focusedJuceView &&
+        [NSStringFromClass(editor.class) hasPrefix:@"JUCEView_"]) {
+        BOOL focused = [editor becomeFirstResponder];
+        if (self.mapping != mapping) return;
+        if (focused) self.focusedJuceView = editor;
     }
 #if BW_IPLUG_EDITOR
-    editorDispatch = priorDispatch;
+    BWEditorPublisher *priorDispatch = editorDispatch;
+    editorDispatch = self;
+    @try {
 #endif
-    if (cancel) [self releaseInput];
-    if (close) {
+        for (uint8_t i = 0; i < count; ++i) {
+            BWEditorInput event = pending[i];
+            if (event.phase >= BWEditorKeyDown && event.phase <= BWEditorKeyFlags) {
+                if (event.textLength > BWEditorKeyTextCapacity || event.unmodifiedLength > BWEditorKeyTextCapacity) continue;
+                NSString *text = [NSString stringWithCharacters:event.text length:event.textLength];
+                NSString *plain = [NSString stringWithCharacters:event.unmodified length:event.unmodifiedLength];
+                BOOL delivered = BWDeliverDetachedEditorKey(editor, event.phase, event.keyCode, event.modifiers, text, plain, event.repeat);
+                if (self.mapping != mapping) return;
+                if (delivered) {
+                    if (event.held) self.heldKeys[@(event.keyCode)] = @(event.phase);
+                    else [self.heldKeys removeObjectForKey:@(event.keyCode)];
+                }
+                continue;
+            }
+            BOOL begins = event.phase == BWEditorPointerDown || event.phase == BWEditorSecondaryDown;
+            if (begins == (self.pointerRelease != 0) || !isfinite(event.x) || !isfinite(event.y)) continue;
+            uint8_t expectedMove = self.pointerRelease == BWEditorSecondaryUp ? BWEditorSecondaryMove : BWEditorPointerMove;
+            if (!begins && event.phase != self.pointerRelease && event.phase != expectedMove) continue;
+            CGPoint point = CGPointMake(event.x, event.y);
+            CGPoint delta = self.pointerRelease ? CGPointMake(point.x - self.lastPoint.x, point.y - self.lastPoint.y) : CGPointZero;
+            UIView *pointerView = editor;
+            CGPoint local = point;
+#if BW_JUCE_EDITOR
+            if (self.juceEditor) {
+                BWSetDetachedJuceCursor(point);
+                if (begins) {
+                    self.pointerOrigin = CGPointZero;
+                    for (BWJucePopup *popup in self.jucePopups.reverseObjectEnumerator) {
+                        if (!CGRectContainsPoint(popup.frame, point)) continue;
+                        pointerView = popup.view;
+                        self.pointerOrigin = popup.frame.origin;
+                        break;
+                    }
+                    if (pointerView == editor && self.jucePopups.count) {
+                        // JUCE handles Escape in its modal menu. A click behind
+                        // that menu must not also activate the underlying editor.
+                        self.pointerRelease = event.phase + 1;
+                        uint16_t escape = (uint16_t)BWMacVirtualKey(UIKeyboardHIDUsageKeyboardEscape);
+                        BWDeliverDetachedEditorKey(editor, BWEditorKeyDown, escape, event.modifiers, @"\033", @"\033", NO);
+                        if (self.mapping != mapping) return;
+                        BWDeliverDetachedEditorKey(editor, BWEditorKeyUp, escape, event.modifiers, @"\033", @"\033", NO);
+                        if (self.mapping != mapping) return;
+                        continue;
+                    }
+                    self.pointerView = pointerView;
+                } else {
+                    pointerView = self.pointerView;
+                    if (!pointerView) {
+                        if (event.phase == self.pointerRelease) self.pointerRelease = 0;
+                        continue;
+                    }
+                }
+                local = CGPointMake(point.x - self.pointerOrigin.x, point.y - self.pointerOrigin.y);
+            }
+#endif
+            BOOL delivered = BWDeliverDetachedEditorPointerWithModifiers(pointerView, local, delta, event.phase, event.modifiers);
+            if (self.mapping != mapping) return;
+            if (delivered) {
+                if (begins) {
+#if BW_JUCE_EDITOR
+                    if (self.juceEditor && !self.pointerView) {
+                        BWClearDetachedJuceButton(event.phase == BWEditorSecondaryDown);
+                        continue;
+                    }
+#endif
+                    self.pointerRelease = event.phase + 1;
+                } else if (event.phase == self.pointerRelease) {
+                    self.pointerRelease = 0;
+#if BW_JUCE_EDITOR
+                    self.pointerView = nil;
+#endif
+                }
+                self.lastPoint = point;
+            }
+#if BW_JUCE_EDITOR
+            else if (begins) self.pointerView = nil;
+#endif
+        }
+#if BW_IPLUG_EDITOR
+    } @finally { editorDispatch = priorDispatch; }
+#endif
+    if (cancel || close) {
         [self releaseInput];
+        if (self.mapping != mapping) return;
+    }
+    if (close) {
         self.close();
         return;
     }
@@ -256,8 +423,23 @@ BOOL BWNAMRequestOpenPanel(NSString *extension, void (^complete)(NSURL *)) {
         self.renderer = [[UIGraphicsImageRenderer alloc] initWithSize:raster format:format];
     }
     UIImage *frame = [self.renderer imageWithActions:^(UIGraphicsImageRendererContext *render) {
-        CGContextScaleCTM(render.CGContext, width / size.width, height / size.height);
+        CGContextRef context = render.CGContext;
+        CGContextScaleCTM(context, width / size.width, height / size.height);
+        CGContextSaveGState(context);
         [editor drawRect:editor.bounds];
+        CGContextRestoreGState(context);
+#if BW_JUCE_EDITOR
+        for (BWJucePopup *popup in self.jucePopups.copy) {
+            CGRect frame = popup.frame;
+            CGContextBeginTransparencyLayerWithRect(context, frame, NULL);
+            CGContextSaveGState(context);
+            CGContextClipToRect(context, frame);
+            CGContextTranslateCTM(context, frame.origin.x, frame.origin.y);
+            [popup.view drawRect:popup.view.bounds];
+            CGContextRestoreGState(context);
+            CGContextEndTransparencyLayer(context);
+        }
+#endif
     }];
     if (!self.bitmap || CGBitmapContextGetWidth(self.bitmap) != width || CGBitmapContextGetHeight(self.bitmap) != height) {
         if (self.bitmap) CGContextRelease(self.bitmap);
@@ -275,12 +457,29 @@ BOOL BWNAMRequestOpenPanel(NSString *extension, void (^complete)(NSURL *)) {
 }
 - (void)releaseInput {
     UIView *editor = self.view ?: self.parent.subviews.firstObject;
-    if (self.pointerRelease) BWDeliverDetachedEditorPointer(editor, self.lastPoint, CGPointZero, self.pointerRelease);
+    BWEditorMapping *mapping = self.mapping;
+    uint8_t pointerRelease = self.pointerRelease;
+    NSDictionary<NSNumber *, NSNumber *> *heldKeys = self.heldKeys.copy;
+    UIView *focused = self.focusedJuceView;
+    UIView *pointerView = editor;
+    CGPoint pointerPoint = self.lastPoint;
+#if BW_JUCE_EDITOR
+    if (self.juceEditor) {
+        pointerView = self.pointerView;
+        pointerPoint = CGPointMake(pointerPoint.x - self.pointerOrigin.x, pointerPoint.y - self.pointerOrigin.y);
+        self.pointerView = nil;
+    }
+#endif
     self.pointerRelease = 0;
-    for (NSNumber *key in self.heldKeys)
-        BWDeliverDetachedEditorKey(editor, self.heldKeys[key].integerValue == BWEditorKeyFlags ? BWEditorKeyFlags : BWEditorKeyUp,
-                                  key.unsignedShortValue, 0, @"", @"", NO);
     [self.heldKeys removeAllObjects];
+    self.focusedJuceView = nil;
+    if (pointerRelease && pointerView) BWDeliverDetachedEditorPointer(pointerView, pointerPoint, CGPointZero, pointerRelease);
+    for (NSNumber *key in heldKeys) {
+        if (self.mapping != mapping) break;
+        BWDeliverDetachedEditorKey(editor, heldKeys[key].integerValue == BWEditorKeyFlags ? BWEditorKeyFlags : BWEditorKeyUp,
+                                  key.unsignedShortValue, 0, @"", @"", NO);
+    }
+    if (self.mapping == mapping) [focused resignFirstResponder];
 }
 - (void)dealloc { if (_bitmap) CGContextRelease(_bitmap); }
 @end
@@ -297,6 +496,12 @@ static id publishEditor(UIView *parent, UIView *view, dispatch_block_t close) {
     publisher.parent = parent;
     publisher.view = view;
     publisher.mapping = mapping;
+#if BW_JUCE_EDITOR
+    if (trackJuceView(parent.subviews.firstObject, publisher)) {
+        publisher.juceEditor = parent.subviews.firstObject;
+        publisher.jucePopups = [NSMutableArray new];
+    }
+#endif
 #if BW_IPLUG_EDITOR
     if (BWIsNAMEditorView(view)) {
         if (!namPublishers) namPublishers = [NSMapTable weakToWeakObjectsMapTable];
@@ -323,21 +528,28 @@ id BWPublishDetachedEditorView(UIView *view, dispatch_block_t close) {
 }
 
 void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
-    [publisher releaseInput];
+    BWEditorMapping *mapping = publisher.mapping;
+    if (!mapping) return;
     [publisher.timer invalidate];
-    if ([publisher.mapping lock]) {
-        publisher.mapping.surface->visible = 0;
-        memset(publisher.mapping.surface->pointers, 0, sizeof(publisher.mapping.surface->pointers));
-        publisher.mapping.surface->pointerCount = 0;
-        [publisher.mapping unlock];
+    publisher.mapping = nil;
+    if ([mapping lock]) {
+        mapping.surface->visible = 0;
+        memset(mapping.surface->pointers, 0, sizeof(mapping.surface->pointers));
+        mapping.surface->pointerCount = 0;
+        [mapping unlock];
     }
 #if BW_IPLUG_EDITOR
     publisher.documentReply = nil;
     if (publisher.view && [namPublishers objectForKey:publisher.view] == publisher)
         [namPublishers removeObjectForKey:publisher.view];
-    removeDocumentExchange(publisher.mapping);
+    removeDocumentExchange(mapping);
 #endif
-    publisher.mapping = nil;
+    [publisher releaseInput];
+#if BW_JUCE_EDITOR
+    for (BWJucePopup *popup in publisher.jucePopups.copy) BWDetachJucePopup(popup);
+    if (publisher.juceEditor && [jucePublishers objectForKey:publisher.juceEditor] == publisher)
+        [jucePublishers removeObjectForKey:publisher.juceEditor];
+#endif
 }
 
 @interface BWEditorViewport : UIView
