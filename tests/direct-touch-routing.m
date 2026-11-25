@@ -165,8 +165,16 @@ static void testHardware(TestView *view) {
     assert(view.keyEvents.lastObject.modifierFlags == 0);
     assert(![view handleHardwarePress:(id)chord down:NO]);
     chord.key.keyCode = UIKeyboardHIDUsageKeyboardCapsLock;
-    assert(![view handleHardwarePress:(id)chord down:YES]);
-    assert(![view handleHardwarePress:(id)chord down:NO]);
+    NSUInteger beforeCaps = view.keyEvents.count;
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    assert([view handleHardwarePress:(id)chord down:NO]);
+    assert(view.keyEvents.count == beforeCaps + 1);
+    assert(view.keyEvents.lastObject.type == 12 && view.keyEvents.lastObject.keyCode == 57);
+    assert([view handleHardwarePress:(id)chord down:YES]);
+    [view cancelHardwareKeys];
+    assert([view handleHardwarePress:(id)chord down:NO]);
+    assert(view.keyEvents.count == beforeCaps + 2);
 }
 
 @interface UIWindow (DesktopDragTest)

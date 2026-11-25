@@ -241,6 +241,7 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 @property(nonatomic) BOOL secondaryMouseTouch;
 @property(nonatomic, strong) NSMutableSet<UITouch *> *endingTouches;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSEvent *> *hardwareKeys;
+@property(nonatomic) BOOL capsLockKeyDown;
 - (void)cancelActiveContacts;
 - (void)cancelHardwareKeys;
 - (void)updateCursor;
@@ -606,17 +607,26 @@ BW_TRACE_MISSING_SELECTOR
     UIKey *key = press.key;
     if (!key) return NO;
     UIKeyboardHIDUsage usage = key.keyCode;
-    // Bitwig's original Caps Lock flagsChanged handler synthesizes a full
-    // key pair. UIKit exposes a physical press and release, not a reliable
-    // toggle notification, so leave Caps Lock itself to UIKit.
-    if (usage == UIKeyboardHIDUsageKeyboardCapsLock) return NO;
+    BOOL capsLock = usage == UIKeyboardHIDUsageKeyboardCapsLock;
+    if (capsLock) {
+        // The original flagsChanged handler sends both native key edges.
+        // One physical press drives one toggle, with no synthetic release.
+        BOOL firstDown = down && !self.capsLockKeyDown;
+        self.capsLockKeyDown = down;
+        if ([NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+            fprintf(stdout, "[UIKit caps] down=%d first=%d flags=%lx\n", down, firstDown,
+                    (unsigned long)key.modifierFlags);
+            fflush(stdout);
+        }
+        if (!firstDown) return YES;
+    }
     NSInteger code = BWMacVirtualKey(usage);
     if (code < 0) return NO;
 
     NSNumber *identifier = @(usage);
     NSEvent *held = self.hardwareKeys[identifier];
     NSUInteger modifier = BWKeyModifier(usage);
-    BOOL modifierEvent = modifier != 0;
+    BOOL modifierEvent = modifier || capsLock;
     if (!down && !held) return NO;
     NSUInteger flags = key.modifierFlags;
     if (modifier) {
@@ -650,10 +660,10 @@ BW_TRACE_MISSING_SELECTOR
     event.timestamp = press.timestamp;
     event.window = self.window;
     event.isARepeat = down && held && !modifierEvent;
-    if (down) {
+    if (down && !capsLock) {
         if (!self.hardwareKeys) self.hardwareKeys = [NSMutableDictionary new];
         self.hardwareKeys[identifier] = event;
-    } else [self.hardwareKeys removeObjectForKey:identifier];
+    } else if (!down) [self.hardwareKeys removeObjectForKey:identifier];
     if (usage == UIKeyboardHIDUsageKeyboardEscape)
         atomic_store_explicit(&escapePressed, down, memory_order_relaxed);
     [self deliverHardwareKey:event];
@@ -663,7 +673,8 @@ BW_TRACE_MISSING_SELECTOR
 - (void)cancelHardwareKeys {
     NSArray<NSEvent *> *held = self.hardwareKeys.allValues;
     [self.hardwareKeys removeAllObjects];
-    currentModifierFlags = 0;
+    self.capsLockKeyDown = NO;
+    currentModifierFlags &= UIKeyModifierAlphaShift;
     atomic_store_explicit(&escapePressed, false, memory_order_relaxed);
     for (NSEvent *prior in held) {
         NSEvent *event = [NSEvent new];
@@ -671,6 +682,7 @@ BW_TRACE_MISSING_SELECTOR
         event.keyCode = prior.keyCode;
         event.characters = prior.characters;
         event.charactersIgnoringModifiers = prior.charactersIgnoringModifiers;
+        event.modifierFlags = currentModifierFlags;
         event.timestamp = NSProcessInfo.processInfo.systemUptime;
         event.window = self.window;
         [self deliverHardwareKey:event];
