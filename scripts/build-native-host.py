@@ -24,7 +24,8 @@ parser.add_argument('--chow-clap', type=Path, help='Also include the supported C
 parser.add_argument('--ott-vst3', type=Path, help='Include the supported local Xfer OTT 1.3.1 desktop VST3')
 bitwig=BitwigSource(parser);args=bitwig.args
 plugin_metadata = args.surge_clap or args.ott_vst3
-if args.ott_vst3 and not args.embedded_engine: parser.error('--ott-vst3 requires --embedded-engine')
+if args.ott_vst3 and not (args.device and args.embedded_engine):
+    parser.error('--ott-vst3 requires --device and --embedded-engine')
 if args.surge_clap and not args.embedded_engine: parser.error('--surge-clap requires --embedded-engine')
 if args.chow_clap and not args.surge_editor_clap_include: parser.error('--chow-clap requires --surge-editor-clap-include')
 if args.surge_editor_clap_include and (not args.surge_clap or not (args.surge_editor_clap_include/'clap/clap.h').is_file()):

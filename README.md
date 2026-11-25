@@ -78,7 +78,7 @@ The same probe accepts `--chow-editor` with the official CHOW Tape Model 2.11.0 
 
 ## Experimental Xfer OTT VST3
 
-Pass `--ott-vst3 "/path/to/OTT.vst3"` to the iPad build with `--embedded-engine` and a supported local installation of Xfer OTT 1.3.1. The build adapts the original ARM64 executable, keeps the original editor resources and signs the private copy locally. In Bitwig Settings → Plug-ins, choose **with Bitwig**. Find OTT from Xfer Records under Audio FX and open its native editor from the device panel.
+Pass `--ott-vst3 "/path/to/OTT.vst3"` to the build with `--device`, `--embedded-engine` and a supported local installation of Xfer OTT 1.3.1. The build adapts the original ARM64 executable, keeps the original editor resources and signs the private copy locally. In Bitwig Settings → Plug-ins, choose **with Bitwig**. Find OTT from Xfer Records under Audio FX and open its native editor from the device panel.
 
 ## Source checks
 
