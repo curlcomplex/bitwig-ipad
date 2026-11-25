@@ -2,6 +2,7 @@
 #ifdef SURGE_EDITOR
 #include <clap/clap.h>
 #include <dlfcn.h>
+#import <objc/message.h>
 
 typedef BOOL (*DeliverPointer)(UIView *, CGPoint, CGPoint, NSInteger);
 
@@ -37,6 +38,17 @@ bool probe_editor(const clap_plugin_t *plugin) {
     if (!deliver || !gui || !params || !gui->is_api_supported(plugin, CLAP_WINDOW_API_COCOA, false) ||
         !gui->create(plugin, CLAP_WINDOW_API_COCOA, false)) return false;
 
+#ifdef CHOW_EDITOR
+    // The original Bitwig creates an NSPanel before handing the plug-in its
+    // Cocoa parent. CHOW checks all desktop windows during rapid repaint.
+    SEL sharedApplication = NSSelectorFromString(@"sharedApplication");
+    id desktop = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"NSApplication"), sharedApplication);
+    SEL initialize = NSSelectorFromString(@"initWithContentRect:styleMask:backing:defer:");
+    __attribute__((objc_precise_lifetime)) id panel = ((id (*)(id, SEL, CGRect, NSUInteger, NSUInteger, BOOL))objc_msgSend)(
+        [NSClassFromString(@"NSPanel") alloc], initialize, CGRectMake(0, 0, 720, 620), 27, 2, YES);
+    if (![[desktop valueForKey:@"windows"] containsObject:panel]) return false;
+#endif
+
     uint32_t width = 0, height = 0;
     if (!gui->get_size(plugin, &width, &height)) return false;
 #ifdef CHOW_EDITOR
@@ -70,6 +82,21 @@ bool probe_editor(const clap_plugin_t *plugin) {
     height = 510;
     if (!gui->can_resize(plugin) || !gui->adjust_size(plugin, &width, &height) || !gui->set_size(plugin, width, height) ||
         !CGSizeEqualToSize(editor.bounds.size, CGSizeMake(width, height))) return false;
+#ifdef CHOW_EDITOR
+    [editor layoutIfNeeded];
+    [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1]];
+    // Decline the plug-in's optional update prompt before exercising Input Gain.
+    if (!pointer(deliver, editor, CGPointMake(460, 286), CGPointZero, 1) ||
+        !pointer(deliver, editor, CGPointMake(460, 286), CGPointZero, 2)) return false;
+    double gain = parameter(plugin, params, "Input Gain");
+    if (!pointer(deliver, editor, CGPointMake(114, 199), CGPointZero, 1)) return false;
+    for (int step = 1; step <= 4; step++)
+        if (!pointer(deliver, editor, CGPointMake(114, 199 - 7 * step), CGPointMake(0, -7), 6)) return false;
+    if (!pointer(deliver, editor, CGPointMake(114, 171), CGPointZero, 2)) return false;
+    params->flush(plugin, &input, &output);
+    double changedGain = parameter(plugin, params, "Input Gain");
+    if (!(changedGain - gain > 0.05)) return false;
+#endif
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
     format.scale = 1;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:editor.bounds.size format:format];
@@ -78,7 +105,8 @@ bool probe_editor(const clap_plugin_t *plugin) {
     gui->destroy(plugin);
     if (parent.subviews.count || png.length < 10000) return false;
 #ifdef CHOW_EDITOR
-    fprintf(stderr, "CHOW_EDITOR_PASS resized to %ux%u, rendered %zu bytes\n", width, height, png.length);
+    fprintf(stderr, "CHOW_EDITOR_PASS Input Gain %.7f→%.7f, resized to %ux%u, rendered %zu bytes\n",
+            gain, changedGain, width, height, png.length);
 #else
     fprintf(stderr, "SURGE_EDITOR_PASS scene %.7f→%.7f cutoff %.7f→%.7f, resized to %ux%u, rendered %zu bytes\n",
             initialScene, switchedScene, initialCutoff, changedCutoff, width, height, png.length);
