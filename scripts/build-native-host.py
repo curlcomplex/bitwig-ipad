@@ -11,6 +11,7 @@ from pathlib import Path
 from bitwig_source import BitwigSource, ENGINE, JNI, ROOT, java_probe_info, sha256
 from surge_clap import BUNDLE_NAME, CHOW_BUNDLE, HELPER_PATH, stage_bundle_loader, stage_desktop_frameworks, stage_surge, stage_metadata_helper
 from ott_vst3 import OTT_BUNDLE, stage_ott, stage_ott_bridges
+from nam_vst3 import NAM_BUNDLE, stage_nam, stage_nam_shader
 from local_config import build_identity, jni_include_paths, selected_simulator, simulator_argument
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--run',action='store_true',help='Install and launch the built Simulator host')
@@ -22,8 +23,11 @@ parser.add_argument('--surge-clap', type=Path, help='Include the supported local
 parser.add_argument('--surge-editor-clap-include', type=Path, help='Enable the experimental Surge editor using the official CLAP SDK include directory')
 parser.add_argument('--chow-clap', type=Path, help='Also include the supported CHOW Tape Model 2.11.0 desktop CLAP')
 parser.add_argument('--ott-vst3', type=Path, help='Include the supported local Xfer OTT 1.3.1 desktop VST3')
+parser.add_argument('--nam-vst3', type=Path, help='Include the supported local Neural Amp Modeler 0.7.13 desktop VST3')
 bitwig=BitwigSource(parser);args=bitwig.args
-plugin_metadata = args.surge_clap or args.ott_vst3
+plugin_metadata = args.surge_clap or args.ott_vst3 or args.nam_vst3
+if args.nam_vst3 and not (args.device and args.embedded_engine):
+    parser.error('--nam-vst3 requires --device and --embedded-engine')
 if args.ott_vst3 and not (args.device and args.embedded_engine):
     parser.error('--ott-vst3 requires --device and --embedded-engine')
 if args.surge_clap and not args.embedded_engine: parser.error('--surge-clap requires --embedded-engine')
@@ -44,6 +48,7 @@ if args.surge_clap: build_name += '-surge'
 if args.surge_editor_clap_include: build_name += '-editor'
 if args.chow_clap: build_name += '-chow'
 if args.ott_vst3: build_name += '-ott'
+if args.nam_vst3: build_name += '-nam'
 BUILD = bitwig.build / build_name
 audit_path = bitwig.evidence / 'native-port-audit.json'
 try:
@@ -76,8 +81,12 @@ compat=LIB/'libBitwigUIKit.dylib'
 frameworks=['UIKit','Foundation','CoreFoundation','CoreGraphics','QuartzCore','CoreServices','CoreVideo','GameController','Metal','UniformTypeIdentifiers']
 run(*CC,'-fno-objc-arc','-c',ROOT/'native/compat/Metal.m','-o',BUILD/'Metal.o')
 compat_sources = [ROOT/'native/compat/AppKit.m', ROOT/'native/compat/DesktopServices.m']
-if args.surge_editor_clap_include or args.ott_vst3: compat_sources.append(ROOT/'native/compat/surge/EditorSurface.m')
+if args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3: compat_sources.append(ROOT/'native/compat/surge/EditorSurface.m')
 compat_defines = ['-DBW_VSTGUI_EDITOR=1'] if args.ott_vst3 else []
+if args.nam_vst3:
+    compat_sources += [ROOT/'native/compat/nam'/name for name in ('Layer.m', 'Capture.m')]
+    compat_defines.append('-DBW_IPLUG_EDITOR=1')
+
 run(*CC,'-fobjc-arc','-dynamiclib',*compat_defines,*compat_sources,BUILD/'Metal.o',*[arg for fw in frameworks for arg in ['-framework',fw]],*[f'-Wl,-reexport_framework,{fw}' for fw in frameworks],'-install_name','@rpath/libBitwigUIKit.dylib','-o',compat)
 bridge_frameworks=['AppKit','Cocoa','Carbon','CoreServices','CoreGraphics','CoreVideo']
 for fw in bridge_frameworks:
@@ -141,6 +150,16 @@ if args.ott_vst3:
         stage_ott(args.ott_vst3, LIB, SDK)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.error(f'Could not stage Xfer OTT VST3: {error}')
+if args.nam_vst3:
+    try:
+        native = ROOT/'native/compat'
+        stage_desktop_frameworks(LIB, CC, native, {'AppKit', 'CoreGraphics', 'CoreServices', 'Foundation'}, editor=True)
+        if not (args.surge_clap or args.ott_vst3):
+            stage_bundle_loader(LIB, CC, native)
+        stage_nam(args.nam_vst3, LIB, SDK)
+        stage_nam_shader(LIB, CC, native, sdk_name)
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        parser.error(f'Could not stage Neural Amp Modeler VST3: {error}')
 if plugin_metadata:
     try:
         stage_metadata_helper(SOURCE, LIB, BUILD)
@@ -160,6 +179,8 @@ if args.surge_clap:
         if previous_bundle.exists(): shutil.rmtree(previous_bundle)
 if args.ott_vst3 and (APP/'Frameworks'/OTT_BUNDLE).exists():
     shutil.rmtree(APP/'Frameworks'/OTT_BUNDLE)
+if args.nam_vst3 and (APP/'Frameworks'/NAM_BUNDLE).exists():
+    shutil.rmtree(APP/'Frameworks'/NAM_BUNDLE)
 shutil.copytree(LIB,APP/'Frameworks',dirs_exist_ok=True)
 if args.embedded_engine:
     shutil.copy2(engine_bundle,APP/'Frameworks'/engine_bundle.name)
@@ -286,7 +307,7 @@ PYSIGN'''
                 'INFOPLIST_FILE':str(BUILD/'Plug-in-Metadata-Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Engine.entitlements'),
                 'CLANG_ENABLE_OBJC_ARC':'YES','APPLICATION_EXTENSION_API_ONLY':'YES',
                 'LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../../Frameworks'}}}
-    if args.surge_editor_clap_include or args.ott_vst3:
+    if args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3:
         host['settings']['base']['GCC_PREPROCESSOR_DEFINITIONS'].append('BW_SURGE_REMOTE=1')
     if args.embedded_tunnel:
         host=project['targets']['BitwigNativeHost']

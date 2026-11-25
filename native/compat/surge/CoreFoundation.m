@@ -18,6 +18,7 @@ static void *(*systemFunction)(CFBundleRef,CFStringRef);
 static NSLock *loaderLock;
 static void *surgeImage;
 static void *ottImage;
+static void *namImage;
 #if BW_CHOW_EDITOR
 static void *chowImage;
 #endif
@@ -54,6 +55,10 @@ static NSString *embeddedPluginBinary(CFBundleRef bundle, void ***slot) {
     if ([path isEqualToString:[frameworks URLByAppendingPathComponent:@"OTT.vst3"].URLByStandardizingPath.path]) {
         if (slot) *slot=&ottImage;
         return [frameworks URLByAppendingPathComponent:@"OTT.bundle"].path;
+    }
+    if ([path isEqualToString:[frameworks URLByAppendingPathComponent:@"NeuralAmpModeler.vst3"].URLByStandardizingPath.path]) {
+        if (slot) *slot=&namImage;
+        return [frameworks URLByAppendingPathComponent:@"NeuralAmpModeler.bundle"].path;
     }
     return nil;
 }
@@ -122,7 +127,7 @@ void *CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef name) {
     [loaderLock unlock];
     if (!function && systemFunction) function=systemFunction(bundle,name);
 #if BW_SURGE_EDITOR
-    if (function && slot!=&ottImage && CFEqual(name, CFSTR("clap_entry"))) {
+    if (function && slot!=&ottImage && slot!=&namImage && CFEqual(name, CFSTR("clap_entry"))) {
         [loaderLock lock];
 #if BW_CHOW_EDITOR
         if (slot==&chowImage) function=(void *)BWCHOWEditorEntry(function);
