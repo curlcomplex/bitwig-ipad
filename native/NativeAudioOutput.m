@@ -211,8 +211,11 @@ static OSStatus configureRoute(AVAudioSession *session, BOOL force) {
     }
     NSData *data = [NSJSONSerialization dataWithJSONObject:published options:0 error:nil];
     if (![data writeToURL:[audioDirectory URLByAppendingPathComponent:@"route.json"] atomically:YES]) {
-        result = kAudioUnitErr_FailedInitialization;
         disposeUnit();
+        atomic_store(&ring->error, kAudioUnitErr_FailedInitialization);
+        // Keep this generation unavailable until its matching metadata is
+        // published. The host timer can retry without exposing the old file.
+        return kAudioUnitErr_FailedInitialization;
     }
     configuredRoute = result ? nil : next;
     route = [published copy];
@@ -298,7 +301,7 @@ BOOL BWPrepareAudioOutput(void) {
     __block NSUInteger ticks = 0;
     dispatch_source_set_event_handler(audioTimer, ^{
         finishIdleCapture();
-        if (atomic_load(&ring->routeGeneration) & 1) configureRoute(session, YES);
+        if ((atomic_load(&ring->routeGeneration) & 1) && ticks % 5 == 0) configureRoute(session, YES);
         uint64_t generation = atomic_load(&ring->routeGeneration);
         uint64_t requested = atomic_load(&ring->requestedGeneration);
         int wanted = requested != 0 && requested == generation;
@@ -315,7 +318,7 @@ BOOL BWPrepareAudioOutput(void) {
         }
         if (++ticks % 50 == 0) {
             NSDictionary *report = @{
-                @"route": route, @"generation": @(atomic_load(&ring->routeGeneration)),
+                @"route": route ?: @{}, @"generation": @(atomic_load(&ring->routeGeneration)),
                 @"running": @(atomic_load(&ring->actualRunning)), @"error": @(atomic_load(&ring->error)),
                 @"callbacks": @(atomic_load(&ring->callbacks)), @"audible_frames": @(atomic_load(&ring->audibleFrames)),
                 @"underrun_frames": @(atomic_load(&ring->underrunFrames)),
