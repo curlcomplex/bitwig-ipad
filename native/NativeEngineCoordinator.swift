@@ -1,4 +1,5 @@
 import Foundation
+import AVFAudio
 @_silgen_name("BWEngineProcessStarted") private func processStarted(_ pid:Int32)
 @_silgen_name("BWEngineProcessExited") private func processExited(_ pid:Int32,_ code:Int32)
 @_silgen_name("BWPrepareAudioOutput") private func prepareAudioOutput()->Bool
@@ -20,6 +21,7 @@ import Foundation
 @objc(NativeEngineCoordinator)
 @MainActor final class NativeEngineCoordinator:NSObject {
     private static var active:AnyObject?
+    private static var waitingForMicrophone = false
     private static var currentPID:Int32=0
     private static func record(_ value:[String:Any]) {
         let file=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0].appendingPathComponent("native-engine-extension.json")
@@ -27,7 +29,17 @@ import Foundation
     }
     @objc(startWithArguments:environment:completion:)
     static func start(arguments:[String],environment:[String:String],completion:@escaping(Int32)->Void) {
-        guard active==nil else {completion(0);return}
+        guard active == nil && !waitingForMicrophone else { completion(0); return }
+        if AVAudioApplication.shared.recordPermission == .undetermined {
+            waitingForMicrophone = true
+            AVAudioApplication.requestRecordPermission { _ in
+                DispatchQueue.main.async {
+                    waitingForMicrophone = false
+                    start(arguments: arguments, environment: environment, completion: completion)
+                }
+            }
+            return
+        }
         guard prepareAudioOutput() else {record(["phase":"failed","error":"Foreground audio output initialization failed"]);completion(0);return}
         let url=Bundle.main.builtInPlugInsURL?.appendingPathComponent("BitwigEngine.appex")
         guard let url,let identifier=Bundle(url:url)?.bundleIdentifier else {
