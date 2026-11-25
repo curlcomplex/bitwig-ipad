@@ -24,7 +24,7 @@ The device host uses an embedded JIT helper with a trusted local developer pairi
 | ARM64 iPad Simulator, Bitwig 6.1.7 | Original Demo interface, editing, menus, touch recognition, gesture cancellation and engine loader startup were exercised. |
 | Physical Bitwig 6.1.7 | Keyboard multitouch was confirmed hands-on. Independent contact release, matched chord PCM and active engine teardown remain unverified. |
 
-Saving and exporting remain subject to Bitwig activation. Standalone post-reboot launch, audio input, third-party plug-ins, some file-picker paths and other hardware configurations remain unqualified. [Compatibility details and test commands](docs/compatibility.md)
+Built-in microphone recording and simultaneous speaker output were verified on a physical iPad. External audio interfaces and live route switching remain unverified. Saving and exporting remain subject to Bitwig activation. Standalone post-reboot launch, third-party plug-ins and some file-picker paths remain unqualified. [Compatibility details and test commands](docs/compatibility.md)
 
 ## Build a Simulator host
 
