@@ -65,6 +65,7 @@ static NSURL *surfaceDirectory(void) {
 @interface BWEditorPublisher : NSObject
 @property(nonatomic, strong) BWEditorMapping *mapping;
 @property(nonatomic, strong) UIView *parent;
+@property(nonatomic, strong) UIView *view;
 @property(nonatomic, strong) NSTimer *timer;
 @property(nonatomic, copy) dispatch_block_t close;
 @property(nonatomic) CGPoint lastPoint;
@@ -78,7 +79,7 @@ static NSURL *surfaceDirectory(void) {
 
 @implementation BWEditorPublisher
 - (void)tick {
-    UIView *editor = self.parent.subviews.firstObject;
+    UIView *editor = self.view ?: self.parent.subviews.firstObject;
     BWEditorMapping *mapping = self.mapping;
     if (![mapping lock]) return;
     BWEditorSurface *surface = mapping.surface;
@@ -176,7 +177,7 @@ static NSURL *surfaceDirectory(void) {
     }
 }
 - (void)releaseInput {
-    UIView *editor = self.parent.subviews.firstObject;
+    UIView *editor = self.view ?: self.parent.subviews.firstObject;
     if (self.pointerRelease) BWDeliverDetachedEditorPointer(editor, self.lastPoint, CGPointZero, self.pointerRelease);
     self.pointerRelease = 0;
     for (NSNumber *key in self.heldKeys)
@@ -187,7 +188,7 @@ static NSURL *surfaceDirectory(void) {
 - (void)dealloc { if (_bitmap) CGContextRelease(_bitmap); }
 @end
 
-id BWPublishDetachedEditor(UIView *parent, dispatch_block_t close) {
+static id publishEditor(UIView *parent, UIView *view, dispatch_block_t close) {
     NSURL *directory = surfaceDirectory();
     if (!directory || ![NSFileManager.defaultManager createDirectoryAtURL:directory
                                                   withIntermediateDirectories:YES attributes:nil error:nil]) return nil;
@@ -197,6 +198,7 @@ id BWPublishDetachedEditor(UIView *parent, dispatch_block_t close) {
     if (!mapping) return nil;
     BWEditorPublisher *publisher = [BWEditorPublisher new];
     publisher.parent = parent;
+    publisher.view = view;
     publisher.mapping = mapping;
     publisher.close = close;
     publisher.heldKeys = [NSMutableDictionary new];
@@ -207,6 +209,14 @@ id BWPublishDetachedEditor(UIView *parent, dispatch_block_t close) {
     }];
     [NSRunLoop.mainRunLoop addTimer:publisher.timer forMode:NSRunLoopCommonModes];
     return publisher;
+}
+
+id BWPublishDetachedEditor(UIView *parent, dispatch_block_t close) {
+    return publishEditor(parent, nil, close);
+}
+
+id BWPublishDetachedEditorView(UIView *view, dispatch_block_t close) {
+    return publishEditor(nil, view, close);
 }
 
 void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {

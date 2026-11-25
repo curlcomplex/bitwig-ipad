@@ -34,6 +34,7 @@ __pycache__/
 !/scripts/compat_discovery.py
 !/scripts/local_config.py
 !/scripts/surge_clap.py
+!/scripts/ott_vst3.py
 !/docs/
 /docs/*
 !/docs/compatibility.md

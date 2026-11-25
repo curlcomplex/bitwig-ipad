@@ -152,6 +152,11 @@ static void runJava(void) {
         NSString *location=[localCLAP stringByDeletingLastPathComponent];
         setenv("CLAP_PATH",location.fileSystemRepresentation,1);
     }
+    NSString *localVST3=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/OTT.vst3"];
+    if([NSFileManager.defaultManager fileExistsAtPath:localVST3]){
+        NSString *location=[localVST3 stringByDeletingLastPathComponent];
+        setenv("VST3_PATH",location.fileSystemRepresentation,1);
+    }
     setenv("JAVA_HOME", home.fileSystemRepresentation, 1);
 #ifdef STATIC_ZERO
 #ifndef SOURCE_ZERO

@@ -65,3 +65,10 @@ NSString *const NSWindowWillMiniaturizeNotification = @"NSWindowWillMiniaturizeN
 NSString *const NSWindowWillMoveNotification = @"NSWindowWillMoveNotification";
 NSString *const NSWorkspaceDidMountNotification = @"NSWorkspaceDidMountNotification";
 NSString *const NSWorkspaceDidUnmountNotification = @"NSWorkspaceDidUnmountNotification";
+
+NSString *const NSColorPboardType = @"NSColor pasteboard type";
+NSString *const NSDragPboard = @"BitwigDragPasteboard";
+NSString *const NSFilenamesPboardType = @"NSFilenamesPboardType";
+NSString *const NSPasteboardTypeColor = @"com.apple.cocoa.pasteboard.color";
+NSString *const NSStringPboardType = @"NSStringPboardType";
+NSString *const NSWindowDidChangeBackingPropertiesNotification = @"NSWindowDidChangeBackingPropertiesNotification";

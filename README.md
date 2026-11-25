@@ -76,6 +76,10 @@ The opt-in `--surge-editor-clap-include /path/to/clap/include` build enables the
 
 The same probe accepts `--chow-editor` with the official CHOW Tape Model 2.11.0 desktop CLAP to exercise the shared editor adapter with a second JUCE plug-in in Simulator. Add `--chow-clap "/path/to/CHOWTapeModel.clap"` to the same iPad editor build to package that release alongside Surge XT.
 
+## Experimental Xfer OTT VST3
+
+Pass `--ott-vst3 "/path/to/OTT.vst3"` to the build with `--device`, `--embedded-engine` and a supported local installation of Xfer OTT 1.3.1. The build adapts the original ARM64 executable, keeps the original editor resources and signs the private copy locally. In Bitwig Settings → Plug-ins, choose **with Bitwig**. Find OTT from Xfer Records under Audio FX and open its native editor from the device panel.
+
 ## Source checks
 
 Run `python3 tests/local-config.py` for configuration validation and `python3 scripts/check-public-source.py` to check a committed snapshot for unexpected file types and common private-data patterns. The check reports categories only. It does not inspect external files or earlier history. Build artifacts and compatibility reports stay local. [Compatibility inventory, diagnostics, and targeted tests](docs/compatibility.md)
