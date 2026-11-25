@@ -197,6 +197,8 @@ PYSIGN'''
         'settings':{'base':{**common,'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier']+'.jithelper','INFOPLIST_FILE':str(BUILD/'Helper-Info.plist'),'APPLICATION_EXTENSION_API_ONLY':'YES'}}}
     }}
     if args.embedded_engine:
+        info['NSMicrophoneUsageDescription'] = 'Use the iPad microphone or connected audio inputs in Bitwig Studio.'
+        (APP/'Info.plist').write_bytes(plistlib.dumps(info))
         host=project['targets']['BitwigNativeHost']
         host['sources'].append({'path':str(ROOT/'native/native-engine-jit.js'),'buildPhase':'resources'})
         host['sources'] += [{'path':str(ROOT/'native/NativeEngineCoordinator.swift')},{'path':str(ROOT/'native/NativeEngineProcess.m')},{'path':str(ROOT/'native/NativeAudioOutput.m')},{'path':str(APP/'engine-entry.json'),'buildPhase':'resources'}]
