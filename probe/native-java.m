@@ -147,6 +147,11 @@ static void runJava(void) {
     dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
     if(!prepared){report[@"phase"]=@"embedded JIT unavailable";save();return;}
 #endif
+    NSString *localCLAP=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/Surge XT.clap"];
+    if([NSFileManager.defaultManager fileExistsAtPath:localCLAP]){
+        NSString *location=[localCLAP stringByDeletingLastPathComponent];
+        setenv("CLAP_PATH",location.fileSystemRepresentation,1);
+    }
     setenv("JAVA_HOME", home.fileSystemRepresentation, 1);
 #ifdef STATIC_ZERO
 #ifndef SOURCE_ZERO
