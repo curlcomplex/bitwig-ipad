@@ -35,7 +35,7 @@ typedef struct {
     uint32_t pointsWide, pointsHigh;
     uint64_t sequence;
     double heartbeat;
-    uint8_t visible, closeRequested;
+    uint8_t visible, closeRequested, cancelRequested;
     uint8_t pointerRead, pointerCount;
     BWEditorInput pointers[BWEditorPointerCapacity];
     uint8_t pixels[BWEditorMaxWidth * BWEditorMaxHeight * 4];

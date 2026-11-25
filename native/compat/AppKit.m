@@ -224,7 +224,8 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
     ((void(*)(id,SEL,id))objc_msgSend)(receiver,selector,event);
 }
 
-BOOL BWDeliverDetachedEditorPointer(UIView *view, CGPoint point, CGPoint delta, NSInteger type) {
+BOOL BWDeliverDetachedEditorPointerWithModifiers(UIView *view, CGPoint point, CGPoint delta, NSInteger type,
+                                                 NSUInteger modifiers) {
     if (!NSThread.isMainThread || !view || view.window) return NO;
     SEL selector;
     switch (type) {
@@ -245,13 +246,17 @@ BOOL BWDeliverDetachedEditorPointer(UIView *view, CGPoint point, CGPoint delta, 
     event.type = type;
     event.clickCount = 1;
     event.buttonNumber = type == 3 || type == 4 || type == 7 ? 1 : 0;
-    event.modifierFlags = currentModifierFlags;
+    event.modifierFlags = modifiers;
     event.locationInWindow = point;
     event.deltaX = delta.x;
     event.deltaY = delta.y;
     event.timestamp = NSProcessInfo.processInfo.systemUptime;
     deliverEvent(view, selector, event);
     return YES;
+}
+
+BOOL BWDeliverDetachedEditorPointer(UIView *view, CGPoint point, CGPoint delta, NSInteger type) {
+    return BWDeliverDetachedEditorPointerWithModifiers(view, point, delta, type, currentModifierFlags);
 }
 
 BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short keyCode, NSUInteger modifiers,
