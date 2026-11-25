@@ -3,7 +3,6 @@
 import argparse
 from pathlib import Path
 import plistlib
-import re
 import shutil
 import subprocess
 import sys
@@ -11,63 +10,11 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
-from surge_clap import adapt_image, digest, stage_desktop_frameworks, stage_surge
-
-CHOW_BINARY = Path('Contents/MacOS/CHOWTapeModel')
-CHOW_SHA256 = '57ebf3a5008165e36828165deb5a332574c6a29b11445270f66f793a3858c1df'
-CHOW_ARM64_SHA256 = 'f36941617e706e396d181dcbb481d4f06eb954c25e2342aeca6999049000d642'
-CHOW_FRAMEWORKS = {'AppKit', 'ApplicationServices', 'Carbon', 'Cocoa', 'CoreGraphics',
-                  'CoreServices', 'DiscRecording', 'Foundation'}
-CHOW_EDITOR_IMPORTS = frozenset(name.encode() for name in '''
-_CGDisplayRegisterReconfigurationCallback
-_CGDisplayRemoveReconfigurationCallback
-_CGEventCreateMouseEvent
-_CGWarpMouseCursorPosition
-_NSAccessibilityPostNotificationWithUserInfo
-_NSAccessibilityUnignoredAncestor
-_NSAccessibilityUnignoredChildrenForOnlyChild
-_NSBeep
-_OBJC_CLASS_$_NSAlert
-_OBJC_CLASS_$_NSAppearance
-_OBJC_CLASS_$_NSBitmapImageRep
-_OBJC_CLASS_$_NSGraphicsContext
-_OBJC_CLASS_$_NSNib
-'''.split())
+from surge_clap import stage_chow, stage_surge
 
 
 def run(*args, **kwargs):
     return subprocess.run([str(a) for a in args], check=True, **kwargs)
-
-
-def stage_chow(source, frameworks, cc):
-    info = plistlib.loads((source / 'Contents/Info.plist').read_bytes())
-    if (info.get('CFBundleIdentifier') != 'org.chowdsp.CHOWTapeModel' or
-            info.get('CFBundleShortVersionString') != '2.11.0' or digest(source / CHOW_BINARY) != CHOW_SHA256):
-        raise ValueError('Expected the official CHOW Tape Model 2.11.0 universal desktop CLAP')
-    destination = frameworks / 'CHOWTapeModel.clap'
-    shutil.copytree(source, destination, symlinks=True)
-    shutil.rmtree(destination / 'Contents/_CodeSignature', ignore_errors=True)
-    binary = destination / CHOW_BINARY
-    thin = destination / 'thin-arm64'
-    run('xcrun', 'lipo', binary, '-thin', 'arm64', '-output', thin)
-    if digest(thin) != CHOW_ARM64_SHA256:
-        raise ValueError('Unexpected CHOW Tape Model ARM64 binary')
-    thin.write_bytes(adapt_image(bytearray(thin.read_bytes()), editor=True, imports=CHOW_EDITOR_IMPORTS))
-    run('xcrun', 'vtool', '-set-build-version', 'iossim', '17.0', '27.2', '-replace', '-output', binary, thin)
-    thin.unlink()
-    stage_desktop_frameworks(frameworks, cc, ROOT / 'native/compat', CHOW_FRAMEWORKS, editor=True)
-    changes = []
-    for line in run('otool', '-L', binary, capture_output=True, text=True).stdout.splitlines()[1:]:
-        old = line.strip().split(' (compatibility')[0]
-        match = re.match(r'/System/Library/Frameworks/([^/]+)\.framework/', old)
-        if not match:
-            continue
-        name = match[1]
-        mapped = (f'@rpath/libSurge{name}Bridge.dylib' if name in CHOW_FRAMEWORKS else
-                  f'/System/Library/Frameworks/{name}.framework/{name}')
-        changes += ['-change', old, mapped]
-    run('xcrun', 'install_name_tool', *changes, binary)
-    return destination
 
 
 def main():

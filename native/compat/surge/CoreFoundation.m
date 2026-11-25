@@ -7,6 +7,9 @@
 #if BW_SURGE_EDITOR
 #include <clap/entry.h>
 extern const clap_plugin_entry_t *BWEditorEntry(const clap_plugin_entry_t *entry);
+#if BW_CHOW_EDITOR
+extern const clap_plugin_entry_t *BWCHOWEditorEntry(const clap_plugin_entry_t *entry);
+#endif
 #endif
 
 static CFArrayRef (*copyArchitectures)(CFBundleRef);
@@ -14,6 +17,9 @@ static Boolean (*systemLoad)(CFBundleRef,CFErrorRef *);
 static void *(*systemFunction)(CFBundleRef,CFStringRef);
 static NSLock *loaderLock;
 static void *surgeImage;
+#if BW_CHOW_EDITOR
+static void *chowImage;
+#endif
 
 static void resolveLoader(void) {
     static dispatch_once_t once;
@@ -26,15 +32,25 @@ static void resolveLoader(void) {
         systemFunction=dlsym(system,"CFBundleGetFunctionPointerForName");
     });
 }
-static NSString *embeddedSurgeBinary(CFBundleRef bundle) {
+static NSString *embeddedCLAPBinary(CFBundleRef bundle, void ***slot) {
     if (!bundle) return nil;
     NSURL *url=CFBridgingRelease(CFBundleCopyBundleURL(bundle));
     NSURL *app=NSBundle.mainBundle.bundleURL;
     if ([app.pathExtension isEqualToString:@"appex"])
         app=app.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
-    NSURL *expected=[app URLByAppendingPathComponent:@"Frameworks/Surge XT.clap" isDirectory:YES];
-    if (![url.URLByStandardizingPath.path isEqualToString:expected.URLByStandardizingPath.path]) return nil;
-    return [[expected.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"SurgeXT.bundle"] path];
+    NSURL *frameworks=[app URLByAppendingPathComponent:@"Frameworks" isDirectory:YES];
+    NSString *path=url.URLByStandardizingPath.path;
+    if ([path isEqualToString:[frameworks URLByAppendingPathComponent:@"Surge XT.clap"].URLByStandardizingPath.path]) {
+        if (slot) *slot=&surgeImage;
+        return [frameworks URLByAppendingPathComponent:@"SurgeXT.bundle"].path;
+    }
+#if BW_CHOW_EDITOR
+    if ([path isEqualToString:[frameworks URLByAppendingPathComponent:@"CHOWTapeModel.clap"].URLByStandardizingPath.path]) {
+        if (slot) *slot=&chowImage;
+        return [frameworks URLByAppendingPathComponent:@"CHOWTapeModel.bundle"].path;
+    }
+#endif
+    return nil;
 }
 
 // iPadOS can return no architectures for the desktop layout Bitwig indexes.
@@ -43,7 +59,7 @@ CFArrayRef CFBundleCopyExecutableArchitectures(CFBundleRef bundle) {
     resolveLoader();
     CFArrayRef architectures=copyArchitectures?copyArchitectures(bundle):NULL;
     if (architectures && CFArrayGetCount(architectures)>0) return architectures;
-    NSString *path=embeddedSurgeBinary(bundle);
+    NSString *path=embeddedCLAPBinary(bundle,NULL);
     if (!path) return architectures;
     if (architectures) CFRelease(architectures);
     int image=open(path.fileSystemRepresentation,O_RDONLY|O_CLOEXEC);
@@ -66,7 +82,8 @@ CFArrayRef CFBundleCopyExecutableArchitectures(CFBundleRef bundle) {
 
 Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *error) {
     resolveLoader();
-    NSString *path=embeddedSurgeBinary(bundle);
+    void **slot=NULL;
+    NSString *path=embeddedCLAPBinary(bundle,&slot);
     if (!path) return systemLoad?systemLoad(bundle,error):false;
     // Use CFBundle normally where supported. Hold the dlopen fallback for the
     // lifetime of this process, matching these callers' no-unload CLAP path.
@@ -76,11 +93,11 @@ Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *err
         return true;
     }
     [loaderLock lock];
-    if (!surgeImage) surgeImage=dlopen(path.fileSystemRepresentation,RTLD_NOW|RTLD_LOCAL);
-    BOOL loaded=surgeImage!=NULL;
+    if (!*slot) *slot=dlopen(path.fileSystemRepresentation,RTLD_NOW|RTLD_LOCAL);
+    BOOL loaded=*slot!=NULL;
     if (!loaded) {
         const char *detail=dlerror();
-        fprintf(stderr,"Surge embedded binary load failed: %s\n",detail?detail:"unknown loader error");
+        fprintf(stderr,"Embedded CLAP %s load failed: %s\n",path.lastPathComponent.UTF8String,detail?detail:"unknown loader error");
     }
     [loaderLock unlock];
     if (loaded || !error) {
@@ -93,15 +110,20 @@ Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *err
 
 void *CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef name) {
     resolveLoader();
-    if (!embeddedSurgeBinary(bundle)) return systemFunction?systemFunction(bundle,name):NULL;
+    void **slot=NULL;
+    if (!embeddedCLAPBinary(bundle,&slot)) return systemFunction?systemFunction(bundle,name):NULL;
     [loaderLock lock];
-    void *function=surgeImage?dlsym(surgeImage,[(__bridge NSString *)name UTF8String]):NULL;
+    void *function=*slot?dlsym(*slot,[(__bridge NSString *)name UTF8String]):NULL;
     [loaderLock unlock];
     if (!function && systemFunction) function=systemFunction(bundle,name);
 #if BW_SURGE_EDITOR
     if (function && CFEqual(name, CFSTR("clap_entry"))) {
         [loaderLock lock];
-        function=(void *)BWEditorEntry(function);
+#if BW_CHOW_EDITOR
+        if (slot==&chowImage) function=(void *)BWCHOWEditorEntry(function);
+        else
+#endif
+            function=(void *)BWEditorEntry(function);
         [loaderLock unlock];
     }
 #endif
