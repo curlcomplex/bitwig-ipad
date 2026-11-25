@@ -67,3 +67,18 @@ xcrun simctl spawn booted "$PWD/build/direct-touch-routing"
 ```
 
 For device input checks, launch the development host with `--native-touch-trace` to log recognizer attachment and UIKit contact phases. Use XCUITest to check simultaneous UIKit delivery and hands-on input to check the original keyboard and radial gestures on the iPad. CoreDevice remote-control input is unavailable on the tested iPadOS 26.6 build.
+
+## Physical DSP concurrency capture
+
+On a development iPad, launch the signed native host with `--native-dsp-profile` and open a disposable Demo project. Wait for the original engine and audio route to settle. This opt-in observer samples named audio workers on a utility queue and leaves them running. It takes 25 sweeps at 250 ms intervals per request.
+
+Use the trusted developer file service to read `Documents/engine-jit-state.json` from the engine extension's app data container, then create an empty `Documents/dsp-profile.<UUID>.request` in the same container. Generate a fresh uppercase UUID for every run. After about six seconds, retrieve `Documents/dsp-profile.<UUID>.json` and read a fresh copy of the JIT state. Keep all three files local. Repeat with playback stopped and with independent clips playing at the same sample rate and buffer size.
+
+Pass the verified image-relative offset range for the original audio-worker entry in your local ARM64 engine. The worker entry differs by engine build.
+
+```sh
+python3 scripts/analyze-dsp-profile.py capture.json jit-before.json jit-after.json \
+  --nonce "$capture_uuid" --worker-range "$worker_start:$worker_end"
+```
+
+The analyzer requires the requested nonce, one engine PID, unchanged JIT counters and a sampled original engine frame for each counted worker. It uses the entire wall interval enclosing both CPU snapshots and excludes the bridge audio producer, UI and JIT services. For multicore playback evidence, look for positive CPU deltas from at least two corroborated workers, a bound clearly above one, a coherent audio route with audible PCM, and stable JIT counters. An underrun limits what the result says about playback continuity. A bound at or below one leaves overlap unresolved. This measurement does not identify logical CPU numbers or establish playback capacity.

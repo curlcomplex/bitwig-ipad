@@ -62,7 +62,8 @@ import Foundation
                 processExited(currentPID,-1);started(0)
                 record(["phase":"interrupted","pid":currentPID]);active=nil;currentPID=0
             }}
-            let item=NSExtensionItem();item.userInfo=["bitwig.engine.arguments":arguments,"bitwig.engine.environment":environment]
+            let item=NSExtensionItem();item.userInfo=["bitwig.engine.arguments":arguments,"bitwig.engine.environment":environment,
+                "bitwig.engine.profile":ProcessInfo.processInfo.arguments.contains("--native-dsp-profile")]
             record(["phase":"starting","arguments":arguments])
             request.begin([item]) {identifier in DispatchQueue.main.async {
                 guard active === found else{started(0);return}

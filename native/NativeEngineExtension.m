@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
+extern dispatch_source_t BWStartDSPProfile(const struct mach_header *header, NSString *documents);
+
 @interface NativeEngineHandler:NSObject <NSExtensionRequestHandling>
 @property(nonatomic,strong) NSExtensionContext *context;
 @property(nonatomic,strong) dispatch_source_t logCapture;
@@ -59,10 +61,16 @@
                 if(!installMemory||!installMemory(header)){
                     [self.context cancelRequestWithError:[NSError errorWithDomain:@"BitwigEngineJIT" code:2 userInfo:@{NSLocalizedDescriptionKey:@"LLVM code memory adaptation failed; see engine-jit-state.json"}]];return;
                 }
+                dispatch_source_t profile = nil;
+                if ([input[@"bitwig.engine.profile"] boolValue]) {
+                    setenv("BW_DSP_PROFILE", "1", 1);
+                    profile = BWStartDSPProfile(header, documents);
+                }
                 int argc=(int)arguments.count+1;char **argv=calloc(argc+1,sizeof(char*));argv[0]=strdup(path.fileSystemRepresentation);
                 for(NSUInteger i=0;i<arguments.count;i++)argv[i+1]=strdup(arguments[i].UTF8String);
                 fprintf(stdout,"Starting original Bitwig engine in embedded process %d\n",getpid());
                 result[@"exit_code"]=@(((int(*)(int,char**))((uintptr_t)header+offset))(argc,argv));
+                if (profile) dispatch_source_cancel(profile);
                 for(int i=0;i<argc;i++)free(argv[i]);free(argv);
             } else result[@"error"]=@"Missing engine entry metadata";
         }
