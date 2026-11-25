@@ -17,9 +17,12 @@ simulator_argument(parser)
 parser.add_argument('--device',action='store_true',help='Build/sign the native iPad host with its embedded JIT helper')
 parser.add_argument('--embedded-tunnel',action='store_true',help='Include the local developer tunnel in the iPad app; configuration requires its setup button')
 parser.add_argument('--embedded-engine',action='store_true',help='Include the adapted audio engine in its own native extension process')
-parser.add_argument('--surge-clap', type=Path, help='Include the supported local Surge XT 1.3.4 desktop CLAP without its editor')
+parser.add_argument('--surge-clap', type=Path, help='Include the supported local Surge XT 1.3.4 desktop CLAP')
+parser.add_argument('--surge-editor-clap-include', type=Path, help='Enable the experimental Surge editor using the official CLAP SDK include directory')
 bitwig=BitwigSource(parser);args=bitwig.args
 if args.surge_clap and not args.embedded_engine: parser.error('--surge-clap requires --embedded-engine')
+if args.surge_editor_clap_include and (not args.surge_clap or not (args.surge_editor_clap_include/'clap/clap.h').is_file()):
+    parser.error('--surge-editor-clap-include needs --surge-clap and the official CLAP SDK include directory')
 if args.embedded_tunnel and not args.device: parser.error('--embedded-tunnel requires --device')
 if args.embedded_engine and not args.device: parser.error('--embedded-engine requires --device')
 if args.run and args.device: parser.error('--run only applies to the Simulator host')
@@ -31,6 +34,7 @@ build_name = 'native-host-tunnel' if args.embedded_tunnel else 'native-host-devi
 if args.embedded_tunnel and not args.embedded_engine: build_name += '-no-engine'
 if args.embedded_engine and not args.embedded_tunnel: build_name += '-engine'
 if args.surge_clap: build_name += '-surge'
+if args.surge_editor_clap_include: build_name += '-editor'
 BUILD = bitwig.build / build_name
 audit_path = bitwig.evidence / 'native-port-audit.json'
 try:
@@ -62,7 +66,9 @@ run(*CC,'-fobjc-arc','-dynamiclib',ROOT/'native/compat/Posix.m',ROOT/'native/com
 compat=LIB/'libBitwigUIKit.dylib'
 frameworks=['UIKit','Foundation','CoreFoundation','CoreGraphics','QuartzCore','CoreServices','CoreVideo','GameController','Metal','UniformTypeIdentifiers']
 run(*CC,'-fno-objc-arc','-c',ROOT/'native/compat/Metal.m','-o',BUILD/'Metal.o')
-run(*CC,'-fobjc-arc','-dynamiclib',ROOT/'native/compat/AppKit.m',ROOT/'native/compat/DesktopServices.m',BUILD/'Metal.o',*[arg for fw in frameworks for arg in ['-framework',fw]],*[f'-Wl,-reexport_framework,{fw}' for fw in frameworks],'-install_name','@rpath/libBitwigUIKit.dylib','-o',compat)
+compat_sources = [ROOT/'native/compat/AppKit.m', ROOT/'native/compat/DesktopServices.m']
+if args.surge_editor_clap_include: compat_sources.append(ROOT/'native/compat/surge/EditorSurface.m')
+run(*CC,'-fobjc-arc','-dynamiclib',*compat_sources,BUILD/'Metal.o',*[arg for fw in frameworks for arg in ['-framework',fw]],*[f'-Wl,-reexport_framework,{fw}' for fw in frameworks],'-install_name','@rpath/libBitwigUIKit.dylib','-o',compat)
 bridge_frameworks=['AppKit','Cocoa','Carbon','CoreServices','CoreGraphics','CoreVideo']
 for fw in bridge_frameworks:
     bridge=LIB/f'lib{fw}Bridge.dylib'
@@ -111,7 +117,8 @@ for name in ['libbitwig-jni.jnilib','JavaNativeFoundation','libsqlitejdbc.jnilib
 run('codesign','--force','--sign','-',compat)
 if args.surge_clap:
     try:
-        stage_surge(args.surge_clap, LIB, SDK, CC, ROOT/'native/compat', args.device)
+        stage_surge(args.surge_clap, LIB, SDK, CC, ROOT/'native/compat', args.device,
+                    editor_headers=args.surge_editor_clap_include)
         stage_metadata_helper(SOURCE, LIB, BUILD)
     except (OSError, ValueError) as error:
         parser.error(f'Could not stage Surge XT CLAP: {error}')
@@ -252,6 +259,8 @@ PYSIGN'''
                 'INFOPLIST_FILE':str(BUILD/'Plug-in-Metadata-Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Engine.entitlements'),
                 'CLANG_ENABLE_OBJC_ARC':'YES','APPLICATION_EXTENSION_API_ONLY':'YES',
                 'LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../../Frameworks'}}}
+    if args.surge_editor_clap_include:
+        host['settings']['base']['GCC_PREPROCESSOR_DEFINITIONS'].append('BW_SURGE_REMOTE=1')
     if args.embedded_tunnel:
         host=project['targets']['BitwigNativeHost']
         host['sources'] += [

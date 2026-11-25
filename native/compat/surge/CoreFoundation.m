@@ -4,6 +4,11 @@
 #include <mach-o/loader.h>
 #include <unistd.h>
 
+#if BW_SURGE_EDITOR
+#include <clap/entry.h>
+extern const clap_plugin_entry_t *BWEditorEntry(const clap_plugin_entry_t *entry);
+#endif
+
 static CFArrayRef (*copyArchitectures)(CFBundleRef);
 static Boolean (*systemLoad)(CFBundleRef,CFErrorRef *);
 static void *(*systemFunction)(CFBundleRef,CFStringRef);
@@ -92,6 +97,13 @@ void *CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef name) {
     [loaderLock lock];
     void *function=surgeImage?dlsym(surgeImage,[(__bridge NSString *)name UTF8String]):NULL;
     [loaderLock unlock];
-    if (function) return function;
-    return systemFunction?systemFunction(bundle,name):NULL;
+    if (!function && systemFunction) function=systemFunction(bundle,name);
+#if BW_SURGE_EDITOR
+    if (function && CFEqual(name, CFSTR("clap_entry"))) {
+        [loaderLock lock];
+        function=(void *)BWEditorEntry(function);
+        [loaderLock unlock];
+    }
+#endif
+    return function;
 }

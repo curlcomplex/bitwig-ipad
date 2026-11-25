@@ -66,11 +66,15 @@ File → Save stores new projects in `BitwigUser/Projects` in the app's shared c
 
 ## Experimental Surge XT CLAP
 
-Pass `--surge-clap "/path/to/Surge XT.clap"` to the iPad build with `--embedded-engine` to include a private copy of the supported Surge XT 1.3.4 desktop release. The build checks the original image, adapts its ARM64 slice, and signs it locally. In Bitwig Settings → Plug-ins, choose **with Bitwig** to use the audio engine's CLAP host. The desktop editor is unavailable, so use Bitwig's device parameters.
+Pass `--surge-clap "/path/to/Surge XT.clap"` to the iPad build with `--embedded-engine` to include a private copy of the supported Surge XT 1.3.4 desktop release. The build checks the original image, adapts its ARM64 slice, and signs it locally. In Bitwig Settings → Plug-ins, choose **with Bitwig** to use the audio engine's CLAP host. This build uses Bitwig's device parameters by default.
 
 On a physical iPad, Bitwig reopened a saved Surge project with its MIDI clip and two edited macro values restored at Surge's saved precision. The original engine played the clip through the built-in speaker with zero reported output errors or underruns. The saved clip also played on AirPods in Bluetooth hands-free mode at 24 kHz hardware and 48 kHz client audio. A live switch to the iPad speaker and back to AirPods also reconnected the open project.
 
 Run `python3 tests/surge-clap-probe.py --help` for the isolated Simulator check that reads the CLAP descriptor, changes and restores a parameter, and verifies note-on output and note-off release.
+
+The opt-in `--surge-editor-clap-include /path/to/clap/include` build enables the original Surge editor. The engine renders the live plug-in instance and the foreground app relays touches from its editor panel. The same CLAP SDK include directory is used by `tests/surge-clap-probe.py --editor`, which checks isolated drawing, parameter edits, resizing, and cleanup alongside state and audio. Physical editor integration is experimental.
+
+The same probe accepts `--chow-editor` with the official CHOW Tape Model 2.11.0 desktop CLAP to exercise the shared editor adapter with a second JUCE plug-in in Simulator. The iPad build option packages Surge XT.
 
 ## Source checks
 

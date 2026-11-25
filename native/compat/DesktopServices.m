@@ -109,9 +109,11 @@ CGSize CGDisplayScreenSize(uint32_t display) {
 }
 bool CGCursorIsVisible(void) { return GCMouse.current!=nil; }
 int32_t CGDisplayMoveCursorToPoint(uint32_t display,CGPoint point) { return 1004; } // iPadOS has no cursor-warp API.
+int32_t CGWarpMouseCursorPosition(CGPoint point) { return 1004; }
 int32_t CGAssociateMouseAndMouseCursorPosition(bool associated) { return associated?0:1004; }
 
 typedef int32_t (^BWDisplayHandler)(void*,const CVTimeStamp*,const CVTimeStamp*,uint64_t,uint64_t*);
+typedef int32_t (*BWDisplayCallback)(void *, const CVTimeStamp *, const CVTimeStamp *, uint64_t, uint64_t *, void *);
 @interface BWUIKitDisplayLink : NSObject
 @property(nonatomic,strong) CADisplayLink *link;
 @property(nonatomic,copy) BWDisplayHandler handler;
@@ -130,6 +132,13 @@ typedef int32_t (^BWDisplayHandler)(void*,const CVTimeStamp*,const CVTimeStamp*,
 int32_t CVDisplayLinkCreateWithCGDisplay(uint32_t display,void **output) { if(!output||display!=1)return -6661;*output=(__bridge_retained void*)[BWUIKitDisplayLink new];return 0; }
 int32_t CVDisplayLinkCreateWithActiveCGDisplays(void **output) { return CVDisplayLinkCreateWithCGDisplay(1,output); }
 int32_t CVDisplayLinkSetOutputHandler(void *value,BWDisplayHandler handler) { if(!value)return -6661;((__bridge BWUIKitDisplayLink*)value).handler=handler;return 0; }
+int32_t CVDisplayLinkSetOutputCallback(void *value, BWDisplayCallback callback, void *context) {
+    if (!callback) return -6661;
+    return CVDisplayLinkSetOutputHandler(value, ^int32_t(void *link, const CVTimeStamp *now, const CVTimeStamp *next,
+                                                        uint64_t flags, uint64_t *outputFlags) {
+        return callback(link, now, next, flags, outputFlags, context);
+    });
+}
 int32_t CVDisplayLinkStart(void *value) {
     if(!value)return -6661;BWUIKitDisplayLink *object=(__bridge id)value;
     dispatch_async(dispatch_get_main_queue(),^{ if(!object.link){object.link=[CADisplayLink displayLinkWithTarget:object selector:@selector(tick:)];[object.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];}object.link.paused=NO; });return 0;

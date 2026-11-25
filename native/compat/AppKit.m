@@ -141,6 +141,14 @@ BW_TRACE_MISSING_SELECTOR
 - (NSDictionary*)deviceDescription { return @{@"NSScreenNumber":@1}; }
 - (NSString*)localizedName { return @"iPad Display"; }
 - (NSInteger)maximumFramesPerSecond { return UIScreen.mainScreen.maximumFramesPerSecond; }
+- (UIEdgeInsets)safeAreaInsets {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindow *window = ((UIWindowScene *)scene).keyWindow;
+        if (window) return window.safeAreaInsets;
+    }
+    return UIEdgeInsetsZero;
+}
 @end
 
 // The original Bitwig image installs these screen-coordinate methods.
@@ -215,6 +223,59 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
     }
     ((void(*)(id,SEL,id))objc_msgSend)(receiver,selector,event);
 }
+
+BOOL BWDeliverDetachedEditorPointerWithModifiers(UIView *view, CGPoint point, CGPoint delta, NSInteger type,
+                                                 NSUInteger modifiers) {
+    if (!NSThread.isMainThread || !view || view.window) return NO;
+    SEL selector;
+    switch (type) {
+        case 1: selector = @selector(mouseDown:); break;
+        case 2: selector = @selector(mouseUp:); break;
+        case 3: selector = @selector(rightMouseDown:); break;
+        case 4: selector = @selector(rightMouseUp:); break;
+        case 6: selector = @selector(mouseDragged:); break;
+        case 7: selector = @selector(rightMouseDragged:); break;
+        default: return NO;
+    }
+    if (![view respondsToSelector:selector]) return NO;
+    if (type == 1) pressedMouseButtons |= 1;
+    if (type == 2) pressedMouseButtons &= ~(NSUInteger)1;
+    if (type == 3) pressedMouseButtons |= 2;
+    if (type == 4) pressedMouseButtons &= ~(NSUInteger)2;
+    NSEvent *event = [NSEvent new];
+    event.type = type;
+    event.clickCount = 1;
+    event.buttonNumber = type == 3 || type == 4 || type == 7 ? 1 : 0;
+    event.modifierFlags = modifiers;
+    event.locationInWindow = point;
+    event.deltaX = delta.x;
+    event.deltaY = delta.y;
+    event.timestamp = NSProcessInfo.processInfo.systemUptime;
+    deliverEvent(view, selector, event);
+    return YES;
+}
+
+BOOL BWDeliverDetachedEditorPointer(UIView *view, CGPoint point, CGPoint delta, NSInteger type) {
+    return BWDeliverDetachedEditorPointerWithModifiers(view, point, delta, type, currentModifierFlags);
+}
+
+BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short keyCode, NSUInteger modifiers,
+                                NSString *characters, NSString *unmodified, BOOL repeat) {
+    if (!NSThread.isMainThread || !view || view.window) return NO;
+    SEL selector = type == 10 ? @selector(keyDown:) : type == 11 ? @selector(keyUp:) : @selector(flagsChanged:);
+    currentModifierFlags = modifiers;
+    if (![view respondsToSelector:selector]) return NO;
+    NSEvent *event = [NSEvent new];
+    event.type = type;
+    event.keyCode = keyCode;
+    event.modifierFlags = modifiers;
+    event.characters = characters;
+    event.charactersIgnoringModifiers = unmodified;
+    event.isARepeat = repeat;
+    event.timestamp = NSProcessInfo.processInfo.systemUptime;
+    deliverEvent(view, selector, event);
+    return YES;
+}
 @interface NSTrackingArea : NSObject
 @property(nonatomic) CGRect rect;
 @property(nonatomic) NSUInteger options;
@@ -227,6 +288,8 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 }
 @end
 @interface NSView : UIView <UIPointerInteractionDelegate,UIKeyInput>
+@property(nonatomic) BOOL postsFrameChangedNotifications;
+@property(nonatomic, copy) NSArray<NSString *> *registeredDraggedTypes;
 @property(nonatomic) BOOL wantsLayer;
 @property(nonatomic) NSInteger layerContentsRedrawPolicy;
 @property(nonatomic) NSInteger layerContentsPlacement;
@@ -252,21 +315,38 @@ BW_TRACE_MISSING_SELECTOR
 // view. The UIKit scene still owns the actual layout and geometry updates.
 - (void)viewWillStartLiveResize {}
 - (void)viewDidEndLiveResize {}
-+ (Class)layerClass { return CAMetalLayer.class; }
++ (Class)layerClass {
+    Class bitwigView = NSClassFromString(@"BWView");
+    return bitwigView && [self isSubclassOfClass:bitwigView] ? CAMetalLayer.class : CALayer.class;
+}
 - (void)setWantsLayer:(BOOL)value {
     _wantsLayer=value;
     if(!value)return;
     CALayer *configured=[self makeBackingLayer];
-    CAMetalLayer *layer=(CAMetalLayer*)self.layer;
-    if(configured!=layer && [configured isKindOfClass:CAMetalLayer.class]) {
+    CALayer *layer=self.layer;
+    if(configured!=layer && [layer isKindOfClass:CAMetalLayer.class] && [configured isKindOfClass:CAMetalLayer.class]) {
         CAMetalLayer *metal=(CAMetalLayer*)configured;
-        layer.device=metal.device;layer.pixelFormat=metal.pixelFormat;
-        layer.framebufferOnly=metal.framebufferOnly;layer.backgroundColor=metal.backgroundColor;
+        CAMetalLayer *drawable=(CAMetalLayer*)layer;
+        drawable.device=metal.device;drawable.pixelFormat=metal.pixelFormat;
+        drawable.framebufferOnly=metal.framebufferOnly;layer.backgroundColor=metal.backgroundColor;
         layer.needsDisplayOnBoundsChange=metal.needsDisplayOnBoundsChange;
     }
     layer.contentsScale=UIScreen.mainScreen.scale;
-    layer.drawableSize=CGSizeMake(self.bounds.size.width*layer.contentsScale,self.bounds.size.height*layer.contentsScale);
+    if ([layer isKindOfClass:CAMetalLayer.class])
+        ((CAMetalLayer *)layer).drawableSize=CGSizeMake(self.bounds.size.width*layer.contentsScale,self.bounds.size.height*layer.contentsScale);
 }
+- (void)setNeedsDisplay:(BOOL)needsDisplay { if (needsDisplay) [self setNeedsDisplay]; }
+- (void)setFrame:(CGRect)frame {
+    CGRect previous = self.frame;
+    [super setFrame:frame];
+    if (self.postsFrameChangedNotifications && !CGRectEqualToRect(previous, self.frame))
+        [NSNotificationCenter.defaultCenter postNotificationName:@"NSViewFrameDidChangeNotification" object:self];
+}
+- (UIView *)hitTest:(CGPoint)point {
+    return [self hitTest:[self convertPoint:point fromView:self.superview] withEvent:nil];
+}
+- (void)registerForDraggedTypes:(NSArray<NSString *> *)types { self.registeredDraggedTypes = types; }
+- (void)unregisterDraggedTypes { self.registeredDraggedTypes = nil; }
 - (void)setLayerContentsRedrawPolicy:(NSInteger)policy { _layerContentsRedrawPolicy=policy;self.layer.needsDisplayOnBoundsChange=(policy==2); }
 - (void)setLayerContentsPlacement:(NSInteger)placement { _layerContentsPlacement=placement;self.layer.contentsGravity=(placement==11?kCAGravityTopLeft:kCAGravityResize); }
 - (id)makeBackingLayer { return self.layer; }
@@ -892,6 +972,10 @@ static void BWUseDesktopWindowDragOrigin(Class recognizerClass) {
 @property(nonatomic) BOOL movableByWindowBackground;
 @property(nonatomic, getter=isMovable) BOOL movable;
 @property(nonatomic) BOOL titlebarAppearsTransparent;
+@property(nonatomic) BOOL showsResizeIndicator;
+@property(nonatomic) BOOL ignoresMouseEvents;
+@property(nonatomic) BOOL hidesOnDeactivate;
+@property(nonatomic) BOOL allowsToolTipsWhenApplicationIsInactive;
 @property(nonatomic) NSInteger titleVisibility;
 @property(nonatomic) NSUInteger sharingType;
 @property(nonatomic,copy) NSArray *registeredDraggedTypes;
@@ -964,6 +1048,10 @@ BW_TRACE_MISSING_SELECTOR
     self.uiWindow.backgroundColor=[UIColor colorWithCGColor:cg];
 }
 - (void)setOpaque:(BOOL)opaque { self.uiWindow.opaque=opaque; }
+- (void)setIgnoresMouseEvents:(BOOL)ignoresMouseEvents {
+    _ignoresMouseEvents = ignoresMouseEvents;
+    self.uiWindow.userInteractionEnabled = !ignoresMouseEvents;
+}
 - (BOOL)isOpaque { return self.uiWindow.opaque; }
 - (void)setHasShadow:(BOOL)shadow { self.uiWindow.layer.shadowOpacity=shadow?0.3:0;self.uiWindow.layer.shadowRadius=8; }
 - (BOOL)canBecomeKeyWindow { return (self.styleMask&9)!=0; }
@@ -1033,8 +1121,15 @@ BW_TRACE_MISSING_SELECTOR
 - (CGRect)convertRectFromBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(1/scale,1/scale)); }
 - (void)makeKeyAndOrderFront:(id)sender { self.hasBeenShown=YES; BOOL wasKey=self.uiWindow.isKeyWindow;[self.uiWindow makeKeyAndVisible];if(wasKey)[(BWUIKitWindow*)self.uiWindow notifyKeyState:YES]; }
 - (void)orderFront:(id)sender { self.hasBeenShown=YES; self.uiWindow.hidden=NO; }
+- (void)orderFrontRegardless { [self orderFront:nil]; }
 - (void)orderOut:(id)sender { self.uiWindow.hidden=YES; }
 - (void)close { [self.contentView cancelActiveContacts]; self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self]; }
+- (void)performClose:(id)sender {
+    SEL shouldClose = @selector(windowShouldClose:);
+    if ([self.delegate respondsToSelector:shouldClose] &&
+        !((BOOL (*)(id, SEL, id))objc_msgSend)(self.delegate, shouldClose, self)) return;
+    [self close];
+}
 - (BOOL)isVisible { return self.uiWindow && !self.uiWindow.hidden; }
 - (BOOL)isMiniaturized { return self.miniaturized; }
 - (BOOL)isZoomed { return CGRectEqualToRect(self.frame,self.uiWindow.windowScene.coordinateSpace.bounds); }
@@ -1059,8 +1154,17 @@ BW_TRACE_MISSING_SELECTOR
     draggingDesktopWindow=self;dragStartOrigin=self.frame.origin;dragStartScreen=[self convertPointToScreen:event.locationInWindow];
 }
 @end
-@interface NSPanel : NSWindow @end
-@implementation NSPanel @end
+@interface NSPanel : NSWindow
+@property(nonatomic, getter=isFloatingPanel) BOOL floatingPanel;
+@end
+@implementation NSPanel
+- (void)setFloatingPanel:(BOOL)floatingPanel {
+    if (_floatingPanel == floatingPanel) return;
+    _floatingPanel = floatingPanel;
+    if (floatingPanel && self.level == 0) self.level = 3;
+    else if (!floatingPanel && self.level == 3) self.level = 0;
+}
+@end
 
 @interface NSApplication : NSObject
 @property(nonatomic,weak) id delegate;
@@ -1143,13 +1247,27 @@ BW_TRACE_MISSING_SELECTOR
 
 @interface NSImage : NSObject
 @property(nonatomic,strong) UIImage *image;
+@property(nonatomic) CGSize preferredSize;
+@end
+@interface NSObject (BWImageRepresentation)
+- (CGImageRef)CGImage;
 @end
 @implementation NSImage
 BW_TRACE_MISSING_SELECTOR
 - (id)initWithSize:(CGSize)size { if((self=[super init])){UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:size];_image=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context){}];}return self; }
 - (id)initWithContentsOfFile:(NSString*)path { if((self=[super init])) _image=[UIImage imageWithContentsOfFile:path]; return self; }
+- (id)initByReferencingFile:(NSString *)path { return [self initWithContentsOfFile:path]; }
 - (id)initWithData:(NSData*)data { if((self=[super init])) _image=[UIImage imageWithData:data]; return self; }
-- (CGSize)size { return self.image.size; }
+- (CGSize)size { return CGSizeEqualToSize(self.preferredSize, CGSizeZero) ? self.image.size : self.preferredSize; }
+- (void)setSize:(CGSize)size { self.preferredSize = size; }
+- (void)addRepresentation:(id)representation {
+    if (![representation respondsToSelector:@selector(CGImage)]) return;
+    CGImageRef image = [representation CGImage];
+    if (image) self.image = [UIImage imageWithCGImage:image];
+}
+- (CGImageRef)CGImageForProposedRect:(CGRect *)rect context:(id)context hints:(NSDictionary *)hints {
+    return self.image.CGImage;
+}
 @end
 @interface NSCursor : NSObject
 @property(nonatomic,strong) NSImage *image;
@@ -1159,6 +1277,44 @@ BW_TRACE_MISSING_SELECTOR
 BW_TRACE_MISSING_SELECTOR
 - (id)initWithImage:(NSImage*)image hotSpot:(CGPoint)point { if((self=[super init])){_image=image;_hotSpot=point;}return self; }
 + (instancetype)arrowCursor { static NSCursor *cursor;static dispatch_once_t once;dispatch_once(&once,^{cursor=[self new];});return cursor; }
++ (instancetype)pointingHandCursor {
+    static NSCursor *cursor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSImage *image = [NSImage new];
+        image.image = [[UIImage systemImageNamed:@"hand.point.up.left.fill"] imageWithTintColor:UIColor.whiteColor
+                                                                   renderingMode:UIImageRenderingModeAlwaysOriginal];
+        cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(2, 2)];
+    });
+    return cursor;
+}
++ (instancetype)resizeUpDownCursor {
+    static NSCursor *cursor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSImage *image = [NSImage new];
+        image.image = [[UIImage systemImageNamed:@"arrow.up.and.down"] imageWithTintColor:UIColor.whiteColor
+                                                             renderingMode:UIImageRenderingModeAlwaysOriginal];
+        cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(image.size.width / 2, image.size.height / 2)];
+    });
+    return cursor;
+}
++ (instancetype)IBeamCursor {
+    static NSCursor *cursor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(9, 18)];
+        NSImage *image = [NSImage new];
+        image.image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+            [UIColor.blackColor setFill];
+            UIRectFill(CGRectMake(4, 1, 1, 16));
+            UIRectFill(CGRectMake(1, 1, 7, 1));
+            UIRectFill(CGRectMake(1, 16, 7, 1));
+        }];
+        cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(4, 9)];
+    });
+    return cursor;
+}
 - (void)set { cursorImage=self.image.image;cursorHotSpot=self.hotSpot;[hoveredView updateCursor]; }
 + (void)hide { cursorHideCount++;[hoveredView updateCursor]; }
 + (void)unhide { if(cursorHideCount)cursorHideCount--;[hoveredView updateCursor]; }

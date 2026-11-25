@@ -1,4 +1,4 @@
-"""Prepare the supported local Surge XT desktop CLAP for a headless iPad host."""
+"""Prepare the supported local Surge XT desktop CLAP for an iPad host."""
 import hashlib
 import json
 import plistlib
@@ -74,7 +74,7 @@ def skip_leb(data, offset, end):
     raise ValueError('Truncated Mach-O bind operand')
 
 
-def mark_editor_imports(data, offset, size):
+def mark_editor_imports(data, offset, size, imports):
     end = offset + size
     seen = set()
     while offset < end:
@@ -83,7 +83,7 @@ def mark_editor_imports(data, offset, size):
         if opcode == 0x40:  # BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM
             name_end = data.index(0, offset, end)
             name = bytes(data[offset:name_end])
-            if name in EDITOR_IMPORTS:
+            if name in imports:
                 data[offset - 1] |= 1  # BIND_SYMBOL_FLAGS_WEAK_IMPORT
                 seen.add(name)
             offset = name_end + 1
@@ -96,7 +96,7 @@ def mark_editor_imports(data, offset, size):
     return seen
 
 
-def make_headless(data):
+def adapt_image(data, *, editor=False, imports=EDITOR_IMPORTS):
     if struct.unpack_from('<I', data)[0] != 0xfeedfacf:
         raise ValueError('Expected a thin Mach-O image')
     commands = struct.unpack_from('<I', data, 16)[0]
@@ -111,9 +111,9 @@ def make_headless(data):
         position += size
     if dyld is None or symtab is None:
         raise ValueError('Missing Mach-O bind metadata')
-    seen = mark_editor_imports(data, dyld[2], dyld[3])
-    seen |= mark_editor_imports(data, dyld[6], dyld[7])
-    if seen != EDITOR_IMPORTS:
+    seen = mark_editor_imports(data, dyld[2], dyld[3], imports)
+    seen |= mark_editor_imports(data, dyld[6], dyld[7], imports)
+    if seen != imports:
         raise ValueError('Unexpected set of desktop editor imports')
 
     symbols, count, strings, _ = symtab
@@ -123,11 +123,11 @@ def make_headless(data):
         if kind & 0x0e or not name:
             continue
         start = strings + name
-        if bytes(data[start:data.index(0, start)]) in EDITOR_IMPORTS:
+        if bytes(data[start:data.index(0, start)]) in imports:
             struct.pack_into('<H', data, entry + 6, flags | 0x40)  # N_WEAK_REF
     if data.count(b'clap.gui\0') != 1:
         raise ValueError('Unexpected CLAP GUI extension lookup')
-    return data.replace(b'clap.gui\0', b'ipad.gui\0')
+    return data if editor else data.replace(b'clap.gui\0', b'ipad.gui\0')
 
 
 def stage_metadata_helper(contents, lib, build):
@@ -183,8 +183,31 @@ def stage_metadata_helper(contents, lib, build):
     (lib / 'surge-plugin-host.json').write_text(json.dumps({'entry': entry}) + '\n')
 
 
-def stage_surge(source, lib, sdk, cc, native, device):
+def stage_desktop_frameworks(lib, cc, native, frameworks, *, editor):
+    bridge = lib / 'libBitwigUIKit.dylib'
+    surge = native / 'surge'
+    for framework in sorted(frameworks):
+        alias = lib / f'libSurge{framework}Bridge.dylib'
+        options = [f'-Wl,-reexport_library,{bridge}', '-Wl,-rpath,@loader_path']
+        sources = [native / 'Forward.c']
+        if framework == 'AppKit':
+            sources = [surge / 'AppKitKeys.m']
+            if editor:
+                sources.append(surge / 'EditorAppKit.m')
+        if framework == 'CoreGraphics' and editor:
+            sources = [surge / 'EditorDisplay.m']
+        if framework == 'Foundation':
+            sources = [surge / 'Foundation.m']
+        if framework == 'CoreServices':
+            options.append('-Wl,-reexport-lSystem')
+        invoke(*cc, '-fobjc-arc', '-dynamiclib', *sources, *options,
+               '-install_name', f'@rpath/{alias.name}', '-o', alias)
+        invoke('codesign', '--force', '--sign', '-', alias)
+
+
+def stage_surge(source, lib, sdk, cc, native, device, *, editor_headers=None):
     verify_source(source)
+    editor = editor_headers is not None
     destination = lib / BUNDLE_NAME
     if destination.exists():
         shutil.rmtree(destination)
@@ -195,22 +218,16 @@ def stage_surge(source, lib, sdk, cc, native, device):
 
     bridge = lib / 'libBitwigUIKit.dylib'
     surge = native / 'surge'
-    for framework in sorted(REPLACED_FRAMEWORKS):
-        alias = lib / f'libSurge{framework}Bridge.dylib'
-        options = [f'-Wl,-reexport_library,{bridge}', '-Wl,-rpath,@loader_path']
-        source_file = native / 'Forward.c'
-        if framework == 'AppKit':
-            source_file = surge / 'AppKitKeys.m'
-        if framework == 'Foundation':
-            source_file = surge / 'Foundation.m'
-        if framework == 'CoreServices':
-            options.append('-Wl,-reexport-lSystem')
-        invoke(*cc, '-fobjc-arc', '-dynamiclib', source_file, *options,
-               '-install_name', f'@rpath/{alias.name}', '-o', alias)
-        invoke('codesign', '--force', '--sign', '-', alias)
+    stage_desktop_frameworks(lib, cc, native, REPLACED_FRAMEWORKS, editor=editor)
     if device:
         core = lib / 'libSurgeCoreFoundationBridge.dylib'
-        invoke(*cc, '-fobjc-arc', '-dynamiclib', surge / 'CoreFoundation.m',
+        sources = [surge / 'CoreFoundation.m']
+        options = []
+        if editor:
+            sources.append(surge / 'EditorEntry.m')
+            options = ['-I', editor_headers, '-DBW_SURGE_EDITOR=1', '-DBW_SURGE_REMOTE=1',
+                       bridge, '-framework', 'UIKit', '-Wl,-rpath,@loader_path']
+        invoke(*cc, '-fobjc-arc', '-dynamiclib', *sources, *options,
                '-framework', 'Foundation', '-Wl,-reexport_framework,CoreFoundation',
                '-install_name', f'@rpath/{core.name}', '-o', core)
         invoke('codesign', '--force', '--sign', '-', core)
@@ -225,7 +242,7 @@ def stage_surge(source, lib, sdk, cc, native, device):
     if digest(thin) != ARM64_SHA256:
         raise ValueError('Unexpected Surge XT ARM64 binary')
     # Modify only a verified private copy before changing its platform or dependencies.
-    thin.write_bytes(make_headless(bytearray(thin.read_bytes())))
+    thin.write_bytes(adapt_image(bytearray(thin.read_bytes()), editor=editor))
     invoke('xcrun', 'vtool', '-set-build-version', 'ios' if device else 'iossim',
            '17.0', '27.2', '-replace', '-output', binary, thin)
     thin.unlink()
@@ -257,7 +274,7 @@ def stage_surge(source, lib, sdk, cc, native, device):
         'version': VERSION,
         'original_universal_sha256': UNIVERSAL_SHA256,
         'original_arm64_sha256': ARM64_SHA256,
-        'desktop_gui': False,
+        'desktop_gui': editor,
         'executable': DEVICE_IMAGE if device else str(BIN),
         'weak_desktop_imports': sorted(name.decode() for name in EDITOR_IMPORTS),
     }, indent=2) + '\n')
