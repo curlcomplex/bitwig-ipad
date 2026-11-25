@@ -20,6 +20,7 @@ static float *captureSamples;
 static UInt32 captureCapacity;
 static BOOL engineDetached, clearCaptureOnIdle;
 static BOOL needsSessionActivation, unitStarted;
+static _Atomic UInt32 lastCallbackFrames;
 
 void BWStopAudioOutput(void) {
     if (!ring) return;
@@ -79,6 +80,7 @@ static OSStatus render(void *context, AudioUnitRenderActionFlags *flags, const A
         audible += signal;
     }
     atomic_store_explicit(&r->readFrame, read + count, memory_order_release);
+    atomic_store_explicit(&lastCallbackFrames, frames, memory_order_relaxed);
     atomic_fetch_add(&r->callbacks, 1);
     atomic_fetch_add(&r->audibleFrames, audible);
     atomic_fetch_add(&r->underrunFrames, frames - count);
@@ -89,6 +91,7 @@ static OSStatus inputOnly(void *context, AudioUnitRenderActionFlags *flags, cons
                           UInt32 bus, UInt32 frames, AudioBufferList *buffers) {
     BWAudioRing *r = context;
     captureInput(r, time, frames);
+    atomic_store_explicit(&lastCallbackFrames, frames, memory_order_relaxed);
     atomic_fetch_add(&r->callbacks, 1);
     return noErr;
 }
@@ -114,6 +117,7 @@ static void disposeUnit(void) {
     captureBuffers = NULL;
     captureSamples = NULL;
     unitStarted = NO;
+    atomic_store_explicit(&lastCallbackFrames, 0, memory_order_relaxed);
     atomic_store(&ring->actualRunning, 0);
 }
 
@@ -121,6 +125,10 @@ static NSDictionary *describeRoute(AVAudioSession *session) {
     AVAudioSessionPortDescription *source = session.currentRoute.inputs.firstObject;
     AVAudioSessionPortDescription *sink = session.currentRoute.outputs.firstObject;
     BOOL permission = AVAudioApplication.sharedInstance.recordPermission == AVAudioApplicationRecordPermissionGranted;
+    double hardwareRate = session.sampleRate;
+    BOOL handsFree = [source.portType isEqualToString:AVAudioSessionPortBluetoothHFP] ||
+        [sink.portType isEqualToString:AVAudioSessionPortBluetoothHFP];
+    double clientRate = handsFree && hardwareRate > 0 && hardwareRate < 44100 ? 48000 : hardwareRate;
     return @{
         @"name": sink.portName ?: source.portName ?: @"iPad audio",
         @"uid": sink.UID ?: source.UID ?: @"",
@@ -131,11 +139,25 @@ static NSDictionary *describeRoute(AVAudioSession *session) {
         @"input_authorized": @(permission),
         @"input_channels": @(permission && source ? session.inputNumberOfChannels : 0),
         @"input_latency": @(session.inputLatency),
-        @"rate": @(session.sampleRate),
+        @"rate": @(clientRate),
+        @"hardware_rate": @(hardwareRate),
         @"channels": @(sink ? session.outputNumberOfChannels : 0),
-        @"frames": @(llround(session.IOBufferDuration * session.sampleRate)),
+        @"frames": @(llround(session.IOBufferDuration * clientRate)),
         @"latency": @(session.outputLatency)
     };
+}
+
+static OSStatus verifyClientFormat(AudioUnit unit, AudioUnitScope scope, AudioUnitElement bus,
+                                   double rate, UInt32 channels) {
+    AudioStreamBasicDescription format = {0};
+    UInt32 size = sizeof(format);
+    OSStatus result = AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, scope, bus, &format, &size);
+    if (result) return result;
+    if (size != sizeof(format) || format.mSampleRate != rate || format.mChannelsPerFrame != channels ||
+        format.mFormatID != kAudioFormatLinearPCM || format.mBitsPerChannel != 32 ||
+        !(format.mFormatFlags & kAudioFormatFlagIsFloat) ||
+        !(format.mFormatFlags & kAudioFormatFlagIsNonInterleaved)) return kAudioUnitErr_FormatNotSupported;
+    return noErr;
 }
 
 static void invalidateRoute(void) {
@@ -222,6 +244,10 @@ static OSStatus configureRoute(AVAudioSession *session, BOOL force) {
                                                    kAudioUnitScope_Global, 0, &callback, sizeof(callback));
     }
     if (!result) result = AudioUnitInitialize(output);
+    if (!result && ring->inputChannels)
+        result = verifyClientFormat(output, kAudioUnitScope_Output, 1, ring->sampleRate, ring->inputChannels);
+    if (!result && ring->channels)
+        result = verifyClientFormat(output, kAudioUnitScope_Input, 0, ring->sampleRate, ring->channels);
     if (result) disposeUnit();
 
     NSMutableDictionary *published = [next mutableCopy];
@@ -243,8 +269,8 @@ static OSStatus configureRoute(AVAudioSession *session, BOOL force) {
     atomic_store(&ring->error, result);
     atomic_store(&ring->inputError, 0);
     atomic_fetch_add_explicit(&ring->routeGeneration, 1, memory_order_release);
-    NSLog(@"Native audio route format status=%d rate=%.0f inputs=%u outputs=%u frames=%u",
-          (int)result, ring->sampleRate, ring->inputChannels, ring->channels, ring->bufferFrames);
+    NSLog(@"Native audio route format status=%d client rate=%.0f hardware rate=%.0f inputs=%u outputs=%u frames=%u",
+          (int)result, ring->sampleRate, [next[@"hardware_rate"] doubleValue], ring->inputChannels, ring->channels, ring->bufferFrames);
     return result;
 }
 
@@ -386,7 +412,8 @@ BOOL BWPrepareAudioOutput(void) {
                 @"running": @(atomic_load(&ring->actualRunning)), @"error": @(atomic_load(&ring->error)),
                 @"requested_generation": @(atomic_load(&ring->requestedGeneration)),
                 @"engine_generation": @(atomic_load(&ring->engineActiveGeneration)),
-                @"callbacks": @(atomic_load(&ring->callbacks)), @"audible_frames": @(atomic_load(&ring->audibleFrames)),
+                @"callbacks": @(atomic_load(&ring->callbacks)),
+                @"last_callback_frames": @(atomic_load_explicit(&lastCallbackFrames, memory_order_relaxed)), @"audible_frames": @(atomic_load(&ring->audibleFrames)),
                 @"underrun_frames": @(atomic_load(&ring->underrunFrames)),
                 @"queued_frames": @(BWAudioQueued(atomic_load(&ring->writeFrame), atomic_load(&ring->readFrame))),
                 @"input_frames": @(atomic_load(&ring->inputFrames)),
