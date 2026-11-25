@@ -2,6 +2,7 @@
 #ifdef SURGE_EDITOR
 #include <clap/clap.h>
 #include <dlfcn.h>
+#import <objc/message.h>
 
 typedef BOOL (*DeliverPointer)(UIView *, CGPoint, CGPoint, NSInteger);
 
@@ -36,6 +37,17 @@ bool probe_editor(const clap_plugin_t *plugin) {
     const clap_output_events_t output = {.try_push = acceptEvent};
     if (!deliver || !gui || !params || !gui->is_api_supported(plugin, CLAP_WINDOW_API_COCOA, false) ||
         !gui->create(plugin, CLAP_WINDOW_API_COCOA, false)) return false;
+
+#ifdef CHOW_EDITOR
+    // The original Bitwig creates an NSPanel before handing the plug-in its
+    // Cocoa parent. CHOW checks all desktop windows during rapid repaint.
+    SEL sharedApplication = NSSelectorFromString(@"sharedApplication");
+    id desktop = ((id (*)(id, SEL))objc_msgSend)(NSClassFromString(@"NSApplication"), sharedApplication);
+    SEL initialize = NSSelectorFromString(@"initWithContentRect:styleMask:backing:defer:");
+    __attribute__((objc_precise_lifetime)) id panel = ((id (*)(id, SEL, CGRect, NSUInteger, NSUInteger, BOOL))objc_msgSend)(
+        [NSClassFromString(@"NSPanel") alloc], initialize, CGRectMake(0, 0, 720, 620), 27, 2, YES);
+    if (![[desktop valueForKey:@"windows"] containsObject:panel]) return false;
+#endif
 
     uint32_t width = 0, height = 0;
     if (!gui->get_size(plugin, &width, &height)) return false;

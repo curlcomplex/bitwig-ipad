@@ -1131,6 +1131,10 @@ BW_TRACE_MISSING_SELECTOR
     [self close];
 }
 - (BOOL)isVisible { return self.uiWindow && !self.uiWindow.hidden; }
+- (BOOL)inLiveResize {
+    if (@available(iOS 26.0, *)) return self.uiWindow.windowScene.effectiveGeometry.isInteractivelyResizing;
+    return NO;
+}
 - (BOOL)isMiniaturized { return self.miniaturized; }
 - (BOOL)isZoomed { return CGRectEqualToRect(self.frame,self.uiWindow.windowScene.coordinateSpace.bounds); }
 - (void)zoom:(id)sender {
