@@ -5,6 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef SURGE_EDITOR
+extern const clap_plugin_entry_t *BWEditorEntry(const clap_plugin_entry_t *entry);
+extern bool probe_editor(const clap_plugin_t *plugin);
+#endif
+
 static const void *CLAP_ABI extension(const clap_host_t *host, const char *id) { return NULL; }
 static void CLAP_ABI request(const clap_host_t *host) {}
 
@@ -72,6 +77,9 @@ int probe_surge(const char *binary, const char *bundle) {
     void *library=dlopen(binary, RTLD_NOW | RTLD_LOCAL);
     if (!library) { fprintf(stderr, "SURGE_LOAD %s\n", dlerror()); return 1; }
     const clap_plugin_entry_t *entry=dlsym(library,"clap_entry");
+#ifdef SURGE_EDITOR
+    entry=BWEditorEntry(entry);
+#endif
     if (!entry || !entry->init(bundle)) { fprintf(stderr, "SURGE_ENTRY failed\n"); return 2; }
     const clap_plugin_factory_t *factory=entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
     const clap_plugin_descriptor_t *desc=factory && factory->get_plugin_count(factory) ? factory->get_plugin_descriptor(factory,0) : NULL;
@@ -84,6 +92,14 @@ int probe_surge(const char *binary, const char *bundle) {
 #ifdef SURGE_HEADLESS
     if (plugin->get_extension(plugin,CLAP_EXT_GUI)) return 11;
     fprintf(stderr,"SURGE_HEADLESS gui unavailable\n");
+#endif
+#ifdef SURGE_EDITOR
+    if (!probe_editor(plugin)) return 12;
+#endif
+#ifdef CHOW_EDITOR
+    plugin->destroy(plugin);
+    entry->deinit();
+    return 0;
 #endif
     const clap_plugin_params_t *params=plugin->get_extension(plugin,CLAP_EXT_PARAMS);
     fprintf(stderr,"SURGE_PARAMS %u\n",params ? params->count(plugin) : 0);
@@ -125,7 +141,11 @@ int probe_surge(const char *binary, const char *bundle) {
     plugin->deactivate(plugin);
     plugin->destroy(plugin);
     entry->deinit();
+#ifndef SURGE_EDITOR
+    // An editor registers Objective-C classes whose implementations remain
+    // reachable from UIKit until process shutdown.
     dlclose(library);
+#endif
     if(peak<=0 || release_peak>=peak*0.01) return 8;
     fprintf(stderr,"SURGE_PASS\n");
     return 0;

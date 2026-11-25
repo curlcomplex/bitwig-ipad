@@ -18,6 +18,7 @@ NSString *const NSAccessibilityGroupRole = @"AXGroup";
 NSString *const NSAccessibilityImageRole = @"AXImage";
 NSString *const NSAccessibilityLayoutChangedNotification = @"AXLayoutChanged";
 NSString *const NSAccessibilityLinkRole = @"AXLink";
+NSString *const NSAccessibilityListRole = @"AXList";
 NSString *const NSAccessibilityMenuItemRole = @"AXMenuItem";
 NSString *const NSAccessibilityMenuRole = @"AXMenu";
 NSString *const NSAccessibilityMinimizeButtonSubrole = @"AXMinimizeButton";

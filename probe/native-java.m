@@ -340,6 +340,21 @@ static void runJava(void) {
     }];
 #endif
     self.window.rootViewController=vc; [self.window makeKeyAndVisible];
+#if BW_SURGE_REMOTE
+    __weak UIWindowScene *weakScene = (UIWindowScene *)scene;
+    NSTimer *editorTimer = [NSTimer timerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *timer) {
+        UIWindowScene *current = weakScene;
+        if (!current) { [timer invalidate]; return; }
+        if (current.activationState != UISceneActivationStateForegroundActive) return;
+        NSString *path = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"libBitwigUIKit.dylib"];
+        void *bridge = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_NOLOAD);
+        if (!bridge) return;
+        void (*poll)(UIWindowScene *) = dlsym(bridge, "BWPollDetachedEditors");
+        if (poll) poll(current);
+        dlclose(bridge);
+    }];
+    [NSRunLoop.mainRunLoop addTimer:editorTimer forMode:NSRunLoopCommonModes];
+#endif
 #ifdef FULL_BITWIG_HOST
     if([NSProcessInfo.processInfo.arguments containsObject:@"--native-ui-automation"]){
         [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *timer){
