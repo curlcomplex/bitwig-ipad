@@ -104,6 +104,10 @@ BW_TRACE_MISSING_SELECTOR
 - (void)reset { self.state = 0; }
 @end
 
+static __weak UIWindow *desktopDragSeedWindow;
+static __weak UIWindow *desktopDragMoveWindow;
+static void BWUseDesktopWindowDragOrigin(Class recognizerClass);
+
 @interface BWTouchRoute : NSObject
 @property(nonatomic, strong) NSNumber *identity;
 @property(nonatomic, copy) NSArray<NSGestureRecognizer *> *recognizers;
@@ -282,6 +286,7 @@ BW_TRACE_MISSING_SELECTOR
     Class bitwigView = NSClassFromString(@"BWView");
     Class directRecognizer = NSClassFromString(@"BWDirectTouchRecognizer");
     if (self.window && bitwigView && directRecognizer && [self isKindOfClass:bitwigView]) {
+        BWUseDesktopWindowDragOrigin(directRecognizer);
         BOOL attached = NO;
         for (NSGestureRecognizer *recognizer in self.appKitRecognizers)
             if ([recognizer isKindOfClass:directRecognizer]) attached = YES;
@@ -607,7 +612,28 @@ static const NSUInteger BWWindowFullScreenAuxiliary = 1ul << 8;
 @interface BWUIKitWindow : UIWindow
 @property(nonatomic,weak) id desktopWindow;
 @end
+@interface UIWindow (BWUIKitFrameOrigin)
+- (void)setFrameOrigin:(CGPoint)origin;
+@end
 @implementation BWUIKitWindow
+- (CGRect)frame {
+    if (self == desktopDragSeedWindow && self.desktopWindow)
+        return ((CGRect (*)(id, SEL))objc_msgSend)(self.desktopWindow, _cmd);
+    return [super frame];
+}
+- (void)setFrameOrigin:(CGPoint)origin {
+    id desktop = self.desktopWindow;
+    if (self != desktopDragMoveWindow || !desktop) {
+        [super setFrameOrigin:origin];
+        return;
+    }
+    desktopDragMoveWindow = nil;
+    @try {
+        ((void (*)(id, SEL, CGPoint))objc_msgSend)(desktop, _cmd, origin);
+    } @finally {
+        desktopDragMoveWindow = self;
+    }
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
     [(id<BWSceneWindow>)self.desktopWindow bwSyncSceneFrame];
@@ -637,6 +663,45 @@ static const NSUInteger BWWindowFullScreenAuxiliary = 1ul << 8;
     return [super forwardingTargetForSelector:selector];
 }
 @end
+
+static void BWUseDesktopWindowDragOrigin(Class recognizerClass) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        SEL selector = NSSelectorFromString(@"setWindowDragTouch:");
+        SEL move = NSSelectorFromString(@"dragWindowWithTouch:");
+        Method method = class_getInstanceMethod(recognizerClass, selector);
+        Method moveMethod = class_getInstanceMethod(recognizerClass, move);
+        if (!method || !moveMethod) return;
+        void (*setWindowDragTouch)(id, SEL, NSTouch *) = (void *)method_getImplementation(method);
+        IMP shim = imp_implementationWithBlock(^(NSGestureRecognizer *recognizer, NSTouch *touch) {
+            // This selector reads view.window.frame to seed the drag and its
+            // move handler later writes the desktop origin via setFrameOrigin:.
+            // Both the UIKit dispatch and original callback run on main.
+            UIWindow *previous = desktopDragSeedWindow;
+            desktopDragSeedWindow = recognizer.view.window;
+            @try {
+                setWindowDragTouch(recognizer, selector, touch);
+            } @finally {
+                desktopDragSeedWindow = previous;
+            }
+        });
+        BOOL (*dragWindowWithTouch)(id, SEL, NSTouch *) = (void *)method_getImplementation(moveMethod);
+        IMP moveShim = imp_implementationWithBlock(^BOOL(NSGestureRecognizer *recognizer, NSTouch *touch) {
+            // UIKit itself also implements setFrameOrigin:. Route only the
+            // original desktop drag through NSWindow's coordinate transform.
+            UIWindow *previous = desktopDragMoveWindow;
+            desktopDragMoveWindow = recognizer.view.window;
+            @try {
+                return dragWindowWithTouch(recognizer, move, touch);
+            } @finally {
+                desktopDragMoveWindow = previous;
+            }
+        });
+        class_replaceMethod(recognizerClass, selector, shim, method_getTypeEncoding(method));
+        class_replaceMethod(recognizerClass, move, moveShim, method_getTypeEncoding(moveMethod));
+    });
+}
+
 @interface NSWindow : NSObject <BWSceneWindow>
 @property(nonatomic,strong) UIWindow *uiWindow;
 @property(nonatomic,strong) NSView *contentView;

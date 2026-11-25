@@ -79,6 +79,102 @@
 - (CGFloat)force { return 1; }
 @end
 
+@interface UIWindow (DesktopDragTest)
+- (CGPoint)convertPointToScreen:(CGPoint)point;
+- (void)setFrameOrigin:(CGPoint)origin;
+@end
+
+@interface DragTestDesktopWindow : NSObject
+@property(nonatomic, weak) UIWindow *window;
+@property(nonatomic) CGRect frame;
+@end
+
+@implementation DragTestDesktopWindow
+- (CGPoint)convertPointToScreen:(CGPoint)point {
+    return CGPointMake(self.frame.origin.x + point.x, self.frame.origin.y + point.y);
+}
+- (void)setFrameOrigin:(CGPoint)origin {
+    CGRect frame = self.frame;
+    frame.origin = origin;
+    self.frame = frame;
+    frame.origin.y = 744 - CGRectGetMaxY(frame);
+    self.window.frame = frame;
+}
+@end
+
+@interface BWDirectTouchRecognizer : NSGestureRecognizer
+@property(nonatomic) CGPoint startOrigin, startScreen;
+@property(nonatomic) BOOL dragging;
+@end
+
+@implementation BWDirectTouchRecognizer
+- (instancetype)init {
+    if ((self = [super initWithTarget:nil action:NULL])) self.allowedTouchTypes = 1;
+    return self;
+}
+- (CGPoint)screenPointOfTouch:(NSTouch *)touch {
+    return [self.view.window convertPointToScreen:[touch locationInView:nil]];
+}
+- (void)setWindowDragTouch:(NSTouch *)touch {
+    self.startScreen = [self screenPointOfTouch:touch];
+    self.startOrigin = self.view.window.frame.origin;
+    self.dragging = YES;
+}
+- (void)touchesBeganWithEvent:(NSEvent *)event {
+    [self setWindowDragTouch:[event touchesMatchingPhase:1 inView:nil].anyObject];
+}
+- (BOOL)dragWindowWithTouch:(NSTouch *)touch {
+    if (!self.dragging) return NO;
+    CGPoint point = [self screenPointOfTouch:touch];
+    [self.view.window setFrameOrigin:CGPointMake(self.startOrigin.x + point.x - self.startScreen.x,
+                                                self.startOrigin.y + point.y - self.startScreen.y)];
+    return YES;
+}
+- (void)touchesMovedWithEvent:(NSEvent *)event {
+    [self dragWindowWithTouch:[event touchesMatchingPhase:2 inView:nil].anyObject];
+}
+- (void)reset { [super reset]; self.dragging = NO; }
+@end
+
+@interface BWView : TestView @end
+@implementation BWView @end
+
+static void testDesktopDrag(void) {
+    UIWindow *window = [[NSClassFromString(@"BWUIKitWindow") alloc] initWithFrame:CGRectZero];
+    DragTestDesktopWindow *desktop = [DragTestDesktopWindow new];
+    desktop.window = window;
+    desktop.frame = CGRectMake(205, 241, 320, 200);
+    [window setValue:desktop forKey:@"desktopWindow"];
+    window.frame = CGRectMake(0, 0, 320, 200);
+    [window setFrameOrigin:CGPointMake(205, 303)];
+    assert(CGPointEqualToPoint(desktop.frame.origin, CGPointMake(205, 241)));
+    BWView *view = [[BWView alloc] initWithFrame:window.bounds];
+    view.testWindow = window;
+    [window addSubview:view];
+    [view didMoveToWindow];
+    TestTouch *touch = [TestTouch new];
+    NSSet *touches = [NSSet setWithObject:touch];
+    touch.point = CGPointMake(40, 20);
+    [view touchesBegan:(id)touches withEvent:nil];
+    [view touchesMoved:(id)touches withEvent:nil];
+    assert(CGPointEqualToPoint(window.frame.origin, CGPointMake(205, 303)));
+    touch.point = CGPointMake(65, 30);
+    [view touchesMoved:(id)touches withEvent:nil];
+    assert(CGPointEqualToPoint(window.frame.origin, CGPointMake(230, 313)));
+    // UIKit now measures in the moved window. The same local offset is a
+    // second screen displacement, not a new drag origin.
+    [view touchesMoved:(id)touches withEvent:nil];
+    assert(CGPointEqualToPoint(window.frame.origin, CGPointMake(255, 323)));
+    [view touchesEnded:(id)touches withEvent:nil];
+    [view touchesMoved:(id)touches withEvent:nil];
+    assert(CGPointEqualToPoint(window.frame.origin, CGPointMake(255, 323)));
+    [view touchesBegan:(id)touches withEvent:nil];
+    [view touchesCancelled:(id)touches withEvent:nil];
+    [view touchesMoved:(id)touches withEvent:nil];
+    assert(CGPointEqualToPoint(window.frame.origin, CGPointMake(255, 323)));
+    assert(view.mouseDowns + view.mouseUps + view.mouseDrags == 0);
+}
+
 int main(void) {
     @autoreleasepool {
         UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 320, 200)];
@@ -128,6 +224,7 @@ int main(void) {
         assert(recognizer.resets == 3);
         [view touchesEnded:(id)[NSSet setWithObject:left] withEvent:nil];
         assert(recognizer.deliveries.count == 7 && view.mouseUps == 1);
-        puts("Direct touch identity, coordinates, staggered release, lifecycle cancellation and mouse/hover routing passed");
+        testDesktopDrag();
+        puts("Direct touch identity, coordinates, staggered release, cancellation, mouse/hover and popup drag passed");
     }
 }
