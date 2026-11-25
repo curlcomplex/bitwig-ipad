@@ -212,7 +212,7 @@ PYSIGN'''
         (BUILD/'Engine-Info.plist').write_bytes(plistlib.dumps(engine_info))
         (BUILD/'Engine.entitlements').write_bytes(plistlib.dumps(identity.group_entitlements()))
         project['targets']['BitwigEngine']={'type':'app-extension','platform':'iOS','deploymentTarget':'26.0',
-            'sources':[{'path':str(ROOT/'native/NativeEngineExtension.m')}],
+            'sources':[{'path':str(ROOT/'native/NativeEngineExtension.m')},{'path':str(ROOT/'native/DSPProfile.m')}],
             'settings':{'base':{**common,'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier']+'.engine',
                 'INFOPLIST_FILE':str(BUILD/'Engine-Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Engine.entitlements'),'CLANG_ENABLE_OBJC_ARC':'YES',
                 'APPLICATION_EXTENSION_API_ONLY':'YES','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../../Frameworks'}}}

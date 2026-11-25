@@ -20,6 +20,7 @@ __pycache__/
 *.ips
 *.log
 /scripts/*
+!/scripts/analyze-dsp-profile.py
 !/scripts/audit-native-port.py
 !/scripts/build-native-host.py
 !/scripts/build-native-engine-probe.py
