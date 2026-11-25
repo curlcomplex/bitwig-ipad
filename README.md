@@ -60,6 +60,10 @@ python3 scripts/build-native-host.py --device --embedded-tunnel --embedded-engin
 
 Use the same `BITWIG_APP` and identity configuration for all three commands. The build does not install the app on an iPad. Provision trust and pairing for the device locally. The existing helper reads `Documents/pairing.plist` from the installed app. Keep pairing records, signing materials, logs, generated files, and proprietary assets outside tracked source.
 
+## Projects and Master Recording
+
+File → Save stores new projects in `BitwigUser/Projects` in the app's shared container. Reopen them from Recent Projects on the Bitwig Dashboard. Use the master meter's record button to capture the master output, and the adjacent folder button to open the project's `master-recordings` folder and preview the recording.
+
 ## Source checks
 
 Run `python3 tests/local-config.py` for configuration validation and `python3 scripts/check-public-source.py` to check a committed snapshot for unexpected file types and common private-data patterns. The check reports categories only. It does not inspect external files or earlier history. Build artifacts and compatibility reports stay local. [Compatibility inventory, diagnostics, and targeted tests](docs/compatibility.md)
