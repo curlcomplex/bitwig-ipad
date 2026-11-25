@@ -72,7 +72,7 @@ static NSURL *surfaceDirectory(void) {
 - (void)tick {
     UIView *editor = self.parent.subviews.firstObject;
     BWEditorMapping *mapping = self.mapping;
-    if (!editor || ![mapping lock]) return;
+    if (![mapping lock]) return;
     BWEditorSurface *surface = mapping.surface;
     BWEditorPointer pending[BWEditorPointerCapacity];
     uint8_t count = 0;
@@ -107,7 +107,7 @@ static NSURL *surfaceDirectory(void) {
         return;
     }
 
-    if (!self.mapping) return;
+    if (!self.mapping || !editor) return;
     [editor layoutIfNeeded];
     CGSize size = editor.bounds.size;
     if (!isfinite(size.width) || !isfinite(size.height) || size.width < 1 || size.height < 1 ||

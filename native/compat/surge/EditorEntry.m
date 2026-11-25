@@ -26,7 +26,10 @@ static BOOL usesRemoteEditor(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         NSDictionary *extension = [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSExtension"];
-        enabled = [extension[@"NSExtensionPrincipalClass"] isEqualToString:@"NativeEngineHandler"] && BWSharedContainerURL() != nil;
+        BOOL engine = [extension[@"NSExtensionPrincipalClass"] isEqualToString:@"NativeEngineHandler"];
+        BOOL shared = BWSharedContainerURL() != nil;
+        enabled = engine && shared;
+        fprintf(stderr, "Surge editor route engine=%d shared=%d remote=%d\n", engine, shared, enabled);
     });
     return enabled;
 }
@@ -34,6 +37,14 @@ static BOOL usesRemoteEditor(void) {
 static BWRemoteEditor *instance(const clap_plugin_t *plugin) {
     if (!usesRemoteEditor()) return nil;
     @synchronized (BWRemoteEditor.class) { return instances[[NSValue valueWithPointer:plugin]]; }
+}
+
+static void editorFailure(NSString *phase, NSException *exception) {
+    NSString *reason = [NSString stringWithFormat:@"Surge editor %@: %@: %@", phase, exception.name, exception.reason];
+    NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *path = [documents URLByAppendingPathComponent:@"surge-editor-failure.log"];
+    [reason writeToURL:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSLog(@"%@", reason);
 }
 #endif
 
@@ -82,14 +93,22 @@ static bool CLAP_ABI createEditor(const clap_plugin_t *plugin, const char *api, 
     fprintf(stderr, "Surge editor create %s floating=%d\n", api ?: "(default)", floating);
 #if BW_SURGE_REMOTE
     BWRemoteEditor *editor = instance(plugin);
-    if (editor && (!api || !*api || !strcmp(api, CLAP_WINDOW_API_COCOA))) {
-        if (editor.created) return false;
-        editor.floating = floating;
-        editor.created = guiFor(plugin)->create(plugin, CLAP_WINDOW_API_COCOA, false);
-        return editor.created;
-    }
-#endif
+    @try {
+        bool result;
+        if (editor && (!api || !*api || !strcmp(api, CLAP_WINDOW_API_COCOA))) {
+            if (editor.created) return false;
+            editor.floating = floating;
+            editor.created = guiFor(plugin)->create(plugin, CLAP_WINDOW_API_COCOA, false);
+            result = editor.created;
+        } else {
+            result = guiFor(plugin)->create(plugin, api, floating);
+        }
+        fprintf(stderr, "Surge editor create returned %d remoteInstance=%d\n", result, editor != nil);
+        return result;
+    } @catch (NSException *exception) { editorFailure(@"create", exception); @throw; }
+#else
     return guiFor(plugin)->create(plugin, api, floating);
+#endif
 }
 
 #if BW_SURGE_REMOTE
@@ -107,14 +126,28 @@ static bool attach(const clap_plugin_t *plugin, BWRemoteEditor *editor) {
 
 static bool CLAP_ABI setParent(const clap_plugin_t *plugin, const clap_window_t *window) {
     BWRemoteEditor *editor = instance(plugin);
-    if (!editor) return guiFor(plugin)->set_parent(plugin, window);
-    return editor.created && window && window->api && !strcmp(window->api, CLAP_WINDOW_API_COCOA) && attach(plugin, editor);
+    @try {
+        bool result = editor ? (editor.created && window && window->api && !strcmp(window->api, CLAP_WINDOW_API_COCOA) && attach(plugin, editor)) :
+                               guiFor(plugin)->set_parent(plugin, window);
+        fprintf(stderr, "Surge editor attach returned %d remoteInstance=%d\n", result, editor != nil);
+        return result;
+    } @catch (NSException *exception) { editorFailure(@"attach", exception); @throw; }
 }
 
 static bool CLAP_ABI setTransient(const clap_plugin_t *plugin, const clap_window_t *window) {
     BWRemoteEditor *editor = instance(plugin);
     if (!editor) return guiFor(plugin)->set_transient(plugin, window);
     return editor.created && editor.floating && window && window->api && !strcmp(window->api, CLAP_WINDOW_API_COCOA);
+}
+
+static bool CLAP_ABI setSize(const clap_plugin_t *plugin, uint32_t width, uint32_t height) {
+    const clap_plugin_gui_t *gui = guiFor(plugin);
+    if (!gui->set_size(plugin, width, height)) return false;
+    BWRemoteEditor *editor = instance(plugin);
+    if (editor.parent && gui->get_size(plugin, &width, &height) && width && height) {
+        editor.parent.frame = CGRectMake(0, 0, width, height);
+    }
+    return true;
 }
 
 static bool CLAP_ABI hideEditor(const clap_plugin_t *plugin) {
@@ -130,10 +163,12 @@ static bool CLAP_ABI hideEditor(const clap_plugin_t *plugin) {
 static bool CLAP_ABI showEditor(const clap_plugin_t *plugin) {
     BWRemoteEditor *editor = instance(plugin);
     const clap_plugin_gui_t *gui = guiFor(plugin);
-    if (!editor) return gui->show(plugin);
-    if (!editor.created || !attach(plugin, editor)) return false;
-    if (editor.publisher) return true;
-    if (!gui->show(plugin)) return false;
+    @try {
+        if (!editor) return gui->show(plugin);
+        if (!editor.created || !attach(plugin, editor)) return false;
+        if (editor.publisher) return true;
+        if (!gui->show(plugin)) return false;
+    } @catch (NSException *exception) { editorFailure(@"show", exception); @throw; }
     __weak BWRemoteEditor *weakEditor = editor;
     editor.publisher = BWPublishDetachedEditor(editor.parent, ^{
         BWRemoteEditor *current = weakEditor;
@@ -144,6 +179,7 @@ static bool CLAP_ABI showEditor(const clap_plugin_t *plugin) {
         else if (hostGUI && hostGUI->request_hide) hostGUI->request_hide(current.host);
     });
     if (!editor.publisher) gui->hide(plugin);
+    fprintf(stderr, "Surge editor publication returned %d\n", editor.publisher != nil);
     return editor.publisher != nil;
 }
 
@@ -180,6 +216,7 @@ static const void *CLAP_ABI extension(const clap_plugin_t *plugin, const char *i
         gui.create = createEditor;
 #if BW_SURGE_REMOTE
         gui.set_parent = setParent;
+        gui.set_size = setSize;
         gui.set_transient = setTransient;
         gui.show = showEditor;
         gui.hide = hideEditor;

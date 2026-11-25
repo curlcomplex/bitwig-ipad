@@ -942,6 +942,10 @@ static void BWUseDesktopWindowDragOrigin(Class recognizerClass) {
 @property(nonatomic) BOOL movableByWindowBackground;
 @property(nonatomic, getter=isMovable) BOOL movable;
 @property(nonatomic) BOOL titlebarAppearsTransparent;
+@property(nonatomic) BOOL showsResizeIndicator;
+@property(nonatomic) BOOL ignoresMouseEvents;
+@property(nonatomic) BOOL hidesOnDeactivate;
+@property(nonatomic) BOOL allowsToolTipsWhenApplicationIsInactive;
 @property(nonatomic) NSInteger titleVisibility;
 @property(nonatomic) NSUInteger sharingType;
 @property(nonatomic,copy) NSArray *registeredDraggedTypes;
@@ -1014,6 +1018,10 @@ BW_TRACE_MISSING_SELECTOR
     self.uiWindow.backgroundColor=[UIColor colorWithCGColor:cg];
 }
 - (void)setOpaque:(BOOL)opaque { self.uiWindow.opaque=opaque; }
+- (void)setIgnoresMouseEvents:(BOOL)ignoresMouseEvents {
+    _ignoresMouseEvents = ignoresMouseEvents;
+    self.uiWindow.userInteractionEnabled = !ignoresMouseEvents;
+}
 - (BOOL)isOpaque { return self.uiWindow.opaque; }
 - (void)setHasShadow:(BOOL)shadow { self.uiWindow.layer.shadowOpacity=shadow?0.3:0;self.uiWindow.layer.shadowRadius=8; }
 - (BOOL)canBecomeKeyWindow { return (self.styleMask&9)!=0; }
@@ -1083,8 +1091,15 @@ BW_TRACE_MISSING_SELECTOR
 - (CGRect)convertRectFromBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(1/scale,1/scale)); }
 - (void)makeKeyAndOrderFront:(id)sender { self.hasBeenShown=YES; BOOL wasKey=self.uiWindow.isKeyWindow;[self.uiWindow makeKeyAndVisible];if(wasKey)[(BWUIKitWindow*)self.uiWindow notifyKeyState:YES]; }
 - (void)orderFront:(id)sender { self.hasBeenShown=YES; self.uiWindow.hidden=NO; }
+- (void)orderFrontRegardless { [self orderFront:nil]; }
 - (void)orderOut:(id)sender { self.uiWindow.hidden=YES; }
 - (void)close { [self.contentView cancelActiveContacts]; self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self]; }
+- (void)performClose:(id)sender {
+    SEL shouldClose = @selector(windowShouldClose:);
+    if ([self.delegate respondsToSelector:shouldClose] &&
+        !((BOOL (*)(id, SEL, id))objc_msgSend)(self.delegate, shouldClose, self)) return;
+    [self close];
+}
 - (BOOL)isVisible { return self.uiWindow && !self.uiWindow.hidden; }
 - (BOOL)isMiniaturized { return self.miniaturized; }
 - (BOOL)isZoomed { return CGRectEqualToRect(self.frame,self.uiWindow.windowScene.coordinateSpace.bounds); }
@@ -1109,8 +1124,17 @@ BW_TRACE_MISSING_SELECTOR
     draggingDesktopWindow=self;dragStartOrigin=self.frame.origin;dragStartScreen=[self convertPointToScreen:event.locationInWindow];
 }
 @end
-@interface NSPanel : NSWindow @end
-@implementation NSPanel @end
+@interface NSPanel : NSWindow
+@property(nonatomic, getter=isFloatingPanel) BOOL floatingPanel;
+@end
+@implementation NSPanel
+- (void)setFloatingPanel:(BOOL)floatingPanel {
+    if (_floatingPanel == floatingPanel) return;
+    _floatingPanel = floatingPanel;
+    if (floatingPanel && self.level == 0) self.level = 3;
+    else if (!floatingPanel && self.level == 3) self.level = 0;
+}
+@end
 
 @interface NSApplication : NSObject
 @property(nonatomic,weak) id delegate;
@@ -1231,6 +1255,17 @@ BW_TRACE_MISSING_SELECTOR
         image.image = [[UIImage systemImageNamed:@"hand.point.up.left.fill"] imageWithTintColor:UIColor.whiteColor
                                                                    renderingMode:UIImageRenderingModeAlwaysOriginal];
         cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(2, 2)];
+    });
+    return cursor;
+}
++ (instancetype)resizeUpDownCursor {
+    static NSCursor *cursor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSImage *image = [NSImage new];
+        image.image = [[UIImage systemImageNamed:@"arrow.up.and.down"] imageWithTintColor:UIColor.whiteColor
+                                                             renderingMode:UIImageRenderingModeAlwaysOriginal];
+        cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(image.size.width / 2, image.size.height / 2)];
     });
     return cursor;
 }
