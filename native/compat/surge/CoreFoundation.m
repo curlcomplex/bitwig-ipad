@@ -17,6 +17,7 @@ static Boolean (*systemLoad)(CFBundleRef,CFErrorRef *);
 static void *(*systemFunction)(CFBundleRef,CFStringRef);
 static NSLock *loaderLock;
 static void *surgeImage;
+static void *ottImage;
 #if BW_CHOW_EDITOR
 static void *chowImage;
 #endif
@@ -32,7 +33,7 @@ static void resolveLoader(void) {
         systemFunction=dlsym(system,"CFBundleGetFunctionPointerForName");
     });
 }
-static NSString *embeddedCLAPBinary(CFBundleRef bundle, void ***slot) {
+static NSString *embeddedPluginBinary(CFBundleRef bundle, void ***slot) {
     if (!bundle) return nil;
     NSURL *url=CFBridgingRelease(CFBundleCopyBundleURL(bundle));
     NSURL *app=NSBundle.mainBundle.bundleURL;
@@ -50,6 +51,10 @@ static NSString *embeddedCLAPBinary(CFBundleRef bundle, void ***slot) {
         return [frameworks URLByAppendingPathComponent:@"CHOWTapeModel.bundle"].path;
     }
 #endif
+    if ([path isEqualToString:[frameworks URLByAppendingPathComponent:@"OTT.vst3"].URLByStandardizingPath.path]) {
+        if (slot) *slot=&ottImage;
+        return [frameworks URLByAppendingPathComponent:@"OTT.bundle"].path;
+    }
     return nil;
 }
 
@@ -59,7 +64,7 @@ CFArrayRef CFBundleCopyExecutableArchitectures(CFBundleRef bundle) {
     resolveLoader();
     CFArrayRef architectures=copyArchitectures?copyArchitectures(bundle):NULL;
     if (architectures && CFArrayGetCount(architectures)>0) return architectures;
-    NSString *path=embeddedCLAPBinary(bundle,NULL);
+    NSString *path=embeddedPluginBinary(bundle,NULL);
     if (!path) return architectures;
     if (architectures) CFRelease(architectures);
     int image=open(path.fileSystemRepresentation,O_RDONLY|O_CLOEXEC);
@@ -75,7 +80,7 @@ CFArrayRef CFBundleCopyExecutableArchitectures(CFBundleRef bundle) {
     const void *values[]={value};
     architectures=CFArrayCreate(NULL,values,1,&kCFTypeArrayCallBacks);
     CFRelease(value);
-    fprintf(stderr,"Surge scanner read ARM64 architecture from signed bundle image\n");
+    fprintf(stderr,"Plug-in scanner read ARM64 architecture from %s\n",path.lastPathComponent.UTF8String);
     return architectures;
 }
 
@@ -83,10 +88,10 @@ CFArrayRef CFBundleCopyExecutableArchitectures(CFBundleRef bundle) {
 Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *error) {
     resolveLoader();
     void **slot=NULL;
-    NSString *path=embeddedCLAPBinary(bundle,&slot);
+    NSString *path=embeddedPluginBinary(bundle,&slot);
     if (!path) return systemLoad?systemLoad(bundle,error):false;
     // Use CFBundle normally where supported. Hold the dlopen fallback for the
-    // lifetime of this process, matching these callers' no-unload CLAP path.
+    // lifetime of this process so native factory pointers remain valid.
     CFErrorRef originalError=NULL;
     if (systemLoad&&systemLoad(bundle,&originalError)) {
         if (originalError) CFRelease(originalError);
@@ -97,7 +102,7 @@ Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *err
     BOOL loaded=*slot!=NULL;
     if (!loaded) {
         const char *detail=dlerror();
-        fprintf(stderr,"Embedded CLAP %s load failed: %s\n",path.lastPathComponent.UTF8String,detail?detail:"unknown loader error");
+        fprintf(stderr,"Embedded plug-in %s load failed: %s\n",path.lastPathComponent.UTF8String,detail?detail:"unknown loader error");
     }
     [loaderLock unlock];
     if (loaded || !error) {
@@ -111,13 +116,13 @@ Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *err
 void *CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef name) {
     resolveLoader();
     void **slot=NULL;
-    if (!embeddedCLAPBinary(bundle,&slot)) return systemFunction?systemFunction(bundle,name):NULL;
+    if (!embeddedPluginBinary(bundle,&slot)) return systemFunction?systemFunction(bundle,name):NULL;
     [loaderLock lock];
     void *function=*slot?dlsym(*slot,[(__bridge NSString *)name UTF8String]):NULL;
     [loaderLock unlock];
     if (!function && systemFunction) function=systemFunction(bundle,name);
 #if BW_SURGE_EDITOR
-    if (function && CFEqual(name, CFSTR("clap_entry"))) {
+    if (function && slot!=&ottImage && CFEqual(name, CFSTR("clap_entry"))) {
         [loaderLock lock];
 #if BW_CHOW_EDITOR
         if (slot==&chowImage) function=(void *)BWCHOWEditorEntry(function);

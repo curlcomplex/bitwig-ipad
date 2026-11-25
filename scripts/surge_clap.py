@@ -96,7 +96,7 @@ def mark_editor_imports(data, offset, size, imports):
     return seen
 
 
-def adapt_image(data, *, editor=False, imports=EDITOR_IMPORTS):
+def weaken_imports(data, imports):
     if struct.unpack_from('<I', data)[0] != 0xfeedfacf:
         raise ValueError('Expected a thin Mach-O image')
     commands = struct.unpack_from('<I', data, 16)[0]
@@ -125,6 +125,11 @@ def adapt_image(data, *, editor=False, imports=EDITOR_IMPORTS):
         start = strings + name
         if bytes(data[start:data.index(0, start)]) in imports:
             struct.pack_into('<H', data, entry + 6, flags | 0x40)  # N_WEAK_REF
+    return data
+
+
+def adapt_image(data, *, editor=False, imports=EDITOR_IMPORTS):
+    weaken_imports(data, imports)
     if data.count(b'clap.gui\0') != 1:
         raise ValueError('Unexpected CLAP GUI extension lookup')
     return data if editor else data.replace(b'clap.gui\0', b'ipad.gui\0')
@@ -205,6 +210,30 @@ def stage_desktop_frameworks(lib, cc, native, frameworks, *, editor):
         invoke('codesign', '--force', '--sign', '-', alias)
 
 
+def stage_bundle_loader(lib, cc, native, *, editor_headers=None, chow=False):
+    bridge = lib / 'libBitwigUIKit.dylib'
+    surge = native / 'surge'
+    editor = editor_headers is not None
+    core = lib / 'libSurgeCoreFoundationBridge.dylib'
+    sources = [surge / 'CoreFoundation.m']
+    options = []
+    if editor:
+        sources.append(surge / 'EditorEntry.m')
+        options = ['-I', editor_headers, '-DBW_SURGE_EDITOR=1', '-DBW_SURGE_REMOTE=1',
+                   bridge, '-framework', 'UIKit', '-Wl,-rpath,@loader_path']
+    if chow:
+        chow_entry = lib.parent / 'CHOWEditorEntry.o'
+        invoke(*cc, '-fobjc-arc', '-c', surge / 'EditorEntry.m', '-I', editor_headers,
+               '-DBW_SURGE_REMOTE=1', '-DBWRemoteEditor=BWCHOWRemoteEditor',
+               '-DBWEditorEntry=BWCHOWEditorEntry', '-DBW_EDITOR_NAME="CHOW"', '-o', chow_entry)
+        sources.append(chow_entry)
+        options.append('-DBW_CHOW_EDITOR=1')
+    invoke(*cc, '-fobjc-arc', '-dynamiclib', *sources, *options,
+           '-framework', 'Foundation', '-Wl,-reexport_framework,CoreFoundation',
+           '-install_name', f'@rpath/{core.name}', '-o', core)
+    invoke('codesign', '--force', '--sign', '-', core)
+
+
 def stage_surge(source, lib, sdk, cc, native, device, *, editor_headers=None, chow=None):
     verify_source(source)
     editor = editor_headers is not None
@@ -216,28 +245,10 @@ def stage_surge(source, lib, sdk, cc, native, device, *, editor_headers=None, ch
     if signature.exists():
         shutil.rmtree(signature)
 
-    bridge = lib / 'libBitwigUIKit.dylib'
     surge = native / 'surge'
     stage_desktop_frameworks(lib, cc, native, REPLACED_FRAMEWORKS | ({'Carbon'} if chow else set()), editor=editor)
     if device:
-        core = lib / 'libSurgeCoreFoundationBridge.dylib'
-        sources = [surge / 'CoreFoundation.m']
-        options = []
-        if editor:
-            sources.append(surge / 'EditorEntry.m')
-            options = ['-I', editor_headers, '-DBW_SURGE_EDITOR=1', '-DBW_SURGE_REMOTE=1',
-                       bridge, '-framework', 'UIKit', '-Wl,-rpath,@loader_path']
-        if chow:
-            chow_entry = lib.parent / 'CHOWEditorEntry.o'
-            invoke(*cc, '-fobjc-arc', '-c', surge / 'EditorEntry.m', '-I', editor_headers,
-                   '-DBW_SURGE_REMOTE=1', '-DBWRemoteEditor=BWCHOWRemoteEditor',
-                   '-DBWEditorEntry=BWCHOWEditorEntry', '-DBW_EDITOR_NAME="CHOW"', '-o', chow_entry)
-            sources.append(chow_entry)
-            options.append('-DBW_CHOW_EDITOR=1')
-        invoke(*cc, '-fobjc-arc', '-dynamiclib', *sources, *options,
-               '-framework', 'Foundation', '-Wl,-reexport_framework,CoreFoundation',
-               '-install_name', f'@rpath/{core.name}', '-o', core)
-        invoke('codesign', '--force', '--sign', '-', core)
+        stage_bundle_loader(lib, cc, native, editor_headers=editor_headers, chow=chow)
     system = lib / 'libSurgeSystemBridge.dylib'
     invoke(*cc, '-dynamiclib', surge / 'System.c', '-Wl,-reexport-lSystem',
            '-install_name', f'@rpath/{system.name}', '-o', system)
