@@ -142,6 +142,19 @@ BW_TRACE_MISSING_SELECTOR
 - (NSInteger)maximumFramesPerSecond { return UIScreen.mainScreen.maximumFramesPerSecond; }
 @end
 
+// The original Bitwig image installs these screen-coordinate methods.
+@interface NSScreen (BWOriginalScreenCoordinates)
++ (instancetype)primaryScreen;
++ (instancetype)screenForFrameRect:(CGRect)rect;
++ (CGPoint)flippedCoordinate:(CGPoint)point inRect:(CGRect)rect;
+- (CGRect)pixelBounds;
+@end
+
+@interface NSObject (BWOriginalWindowCoordinates)
+- (CGRect)convertRectToGlobalPixels:(CGRect)rect;
+- (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location;
+@end
+
 @interface NSEvent : NSObject
 @property(nonatomic) CGPoint locationInWindow;
 @property(nonatomic) NSTimeInterval timestamp;
@@ -616,6 +629,29 @@ static const NSUInteger BWWindowFullScreenAuxiliary = 1ul << 8;
 - (void)setFrameOrigin:(CGPoint)origin;
 @end
 @implementation BWUIKitWindow
+- (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location {
+    id desktop = self.desktopWindow;
+    if (![desktop respondsToSelector:@selector(convertRectToGlobalPixels:)] ||
+        ![NSScreen respondsToSelector:@selector(screenForFrameRect:)] ||
+        ![NSScreen respondsToSelector:@selector(primaryScreen)] ||
+        ![NSScreen respondsToSelector:@selector(flippedCoordinate:inRect:)])
+        return [desktop convertEventScreenLocationBackingStore:location];
+
+    CGRect probe = CGRectMake(location.x, location.y, 1, 1);
+    if ([NSScreen screenForFrameRect:probe])
+        return [desktop convertEventScreenLocationBackingStore:location];
+
+    NSScreen *primary = [NSScreen primaryScreen];
+    if (![primary respondsToSelector:@selector(pixelBounds)])
+        return [desktop convertEventScreenLocationBackingStore:location];
+
+    // Use the sending window's screen even at or beyond its edge. The
+    // original event conversion chooses a screen by rectangle overlap and
+    // leaves the coordinates in points if the probe misses every screen.
+    CGRect pixels = [desktop convertRectToGlobalPixels:probe];
+    return [NSScreen flippedCoordinate:pixels.origin inRect:primary.pixelBounds];
+}
+
 - (CGRect)frame {
     if (self == desktopDragSeedWindow && self.desktopWindow)
         return ((CGRect (*)(id, SEL))objc_msgSend)(self.desktopWindow, _cmd);

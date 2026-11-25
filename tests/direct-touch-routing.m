@@ -82,6 +82,26 @@
 @interface UIWindow (DesktopDragTest)
 - (CGPoint)convertPointToScreen:(CGPoint)point;
 - (void)setFrameOrigin:(CGPoint)origin;
+- (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location;
+@end
+
+@interface NSScreen : NSObject @end
+@interface NSScreen (ScreenEdgeTest)
++ (instancetype)primaryScreen;
++ (instancetype)screenForFrameRect:(CGRect)rect;
++ (CGPoint)flippedCoordinate:(CGPoint)point inRect:(CGRect)rect;
+- (CGRect)pixelBounds;
+@end
+@implementation NSScreen (ScreenEdgeTest)
++ (instancetype)primaryScreen { return [self new]; }
++ (instancetype)screenForFrameRect:(CGRect)rect {
+    CGRect hit = CGRectIntersection(rect, CGRectMake(0, 0, 1133, 744));
+    return CGRectIsEmpty(hit) ? nil : [self primaryScreen];
+}
++ (CGPoint)flippedCoordinate:(CGPoint)point inRect:(CGRect)rect {
+    return CGPointMake(point.x, CGRectGetMaxY(rect) - point.y);
+}
+- (CGRect)pixelBounds { return CGRectMake(0, 0, 2266, 1488); }
 @end
 
 @interface DragTestDesktopWindow : NSObject
@@ -90,6 +110,14 @@
 @end
 
 @implementation DragTestDesktopWindow
+- (CGRect)convertRectToGlobalPixels:(CGRect)rect {
+    return CGRectApplyAffineTransform(rect, CGAffineTransformMakeScale(2, 2));
+}
+- (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location {
+    CGRect rect = CGRectMake(location.x, location.y, 1, 1);
+    if ([NSScreen screenForFrameRect:rect]) rect = [self convertRectToGlobalPixels:rect];
+    return [NSScreen flippedCoordinate:rect.origin inRect:NSScreen.primaryScreen.pixelBounds];
+}
 - (CGPoint)convertPointToScreen:(CGPoint)point {
     return CGPointMake(self.frame.origin.x + point.x, self.frame.origin.y + point.y);
 }
@@ -145,6 +173,15 @@ static void testDesktopDrag(void) {
     desktop.window = window;
     desktop.frame = CGRectMake(205, 241, 320, 200);
     [window setValue:desktop forKey:@"desktopWindow"];
+    // For a 2× screen, the vendor's missed screen lookup mixes points and
+    // pixels at the exact edge. The bridge keeps the original touch position.
+    CGPoint top = CGPointMake(462, 744);
+    assert(CGPointEqualToPoint([desktop convertEventScreenLocationBackingStore:top], CGPointMake(462, 744)));
+    assert(CGPointEqualToPoint([window convertEventScreenLocationBackingStore:CGPointMake(462, 743.5)], CGPointMake(924, 1)));
+    assert(CGPointEqualToPoint([window convertEventScreenLocationBackingStore:top], CGPointMake(924, 0)));
+    assert(CGPointEqualToPoint([window convertEventScreenLocationBackingStore:CGPointMake(462, 745)], CGPointMake(924, -2)));
+    assert(CGPointEqualToPoint([window convertEventScreenLocationBackingStore:CGPointMake(1133, 700)], CGPointMake(2266, 88)));
+    assert(CGPointEqualToPoint([window convertEventScreenLocationBackingStore:CGPointMake(-1, -1)], CGPointMake(-2, 1490)));
     window.frame = CGRectMake(0, 0, 320, 200);
     [window setFrameOrigin:CGPointMake(205, 303)];
     assert(CGPointEqualToPoint(desktop.frame.origin, CGPointMake(205, 241)));
