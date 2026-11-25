@@ -14,6 +14,11 @@ extern BOOL BWDeliverDetachedEditorPointerWithModifiers(UIView *view, CGPoint po
 extern BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short keyCode, NSUInteger modifiers,
                                       NSString *characters, NSString *unmodified, BOOL repeat);
 
+#if BW_IPLUG_EDITOR
+extern BOOL BWIsNAMEditorView(UIView *view);
+extern NSData *BWNAMMetalFrame(UIView *editor, NSUInteger *width, NSUInteger *height, uint64_t *sequence);
+#endif
+
 static BOOL isMove(uint8_t phase) { return phase == BWEditorPointerMove || phase == BWEditorSecondaryMove; }
 
 static NSURL *surfaceDirectory(void) {
@@ -73,11 +78,30 @@ static NSURL *surfaceDirectory(void) {
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSNumber *> *heldKeys;
 @property(nonatomic) CGContextRef bitmap;
 @property(nonatomic, strong) UIGraphicsImageRenderer *renderer;
+#if BW_IPLUG_EDITOR
+@property(nonatomic) uint64_t metalFrameSequence;
+#endif
 - (void)tick;
 - (void)releaseInput;
 @end
 
 @implementation BWEditorPublisher
+- (BOOL)publishPixels:(const void *)pixels width:(NSUInteger)width height:(NSUInteger)height points:(CGSize)size {
+    BWEditorMapping *mapping = self.mapping;
+    if (![mapping lock]) return NO;
+    BWEditorSurface *surface = mapping.surface;
+    memcpy(surface->pixels, pixels, width * height * 4);
+    surface->width = (uint32_t)width;
+    surface->height = (uint32_t)height;
+    surface->stride = (uint32_t)(width * 4);
+    surface->pointsWide = (uint32_t)size.width;
+    surface->pointsHigh = (uint32_t)size.height;
+    surface->heartbeat = NSProcessInfo.processInfo.systemUptime;
+    surface->visible = 1;
+    ++surface->sequence;
+    [mapping unlock];
+    return YES;
+}
 - (void)tick {
     UIView *editor = self.view ?: self.parent.subviews.firstObject;
     BWEditorMapping *mapping = self.mapping;
@@ -139,6 +163,22 @@ static NSURL *surfaceDirectory(void) {
     CGSize size = editor.bounds.size;
     if (!isfinite(size.width) || !isfinite(size.height) || size.width < 1 || size.height < 1 ||
         size.width > UINT32_MAX || size.height > UINT32_MAX) return;
+#if BW_IPLUG_EDITOR
+    if (BWIsNAMEditorView(editor)) {
+        NSUInteger width = 0, height = 0;
+        uint64_t sequence = 0;
+        NSData *pixels = BWNAMMetalFrame(editor, &width, &height, &sequence);
+        if (pixels.length && sequence != self.metalFrameSequence) {
+            if ([self publishPixels:pixels.bytes width:width height:height points:size])
+                self.metalFrameSequence = sequence;
+        } else if (self.metalFrameSequence && [mapping lock]) {
+            // NanoVG draws only when dirty; a live editor may hold one frame.
+            surface->heartbeat = NSProcessInfo.processInfo.systemUptime;
+            [mapping unlock];
+        }
+        return;
+    }
+#endif
     CGFloat scale = MIN(1, MIN(BWEditorMaxWidth / size.width, BWEditorMaxHeight / size.height));
     size_t width = MAX(1, floor(size.width * scale)), height = MAX(1, floor(size.height * scale));
     CGSize raster = CGSizeMake(width, height);
@@ -163,17 +203,7 @@ static NSURL *surfaceDirectory(void) {
     if (context && frame.CGImage) {
         CGContextClearRect(context, CGRectMake(0, 0, width, height));
         CGContextDrawImage(context, CGRectMake(0, 0, width, height), frame.CGImage);
-        if (!self.mapping || ![mapping lock]) return;
-        memcpy(surface->pixels, CGBitmapContextGetData(context), width * height * 4);
-        surface->width = (uint32_t)width;
-        surface->height = (uint32_t)height;
-        surface->stride = (uint32_t)(width * 4);
-        surface->pointsWide = (uint32_t)size.width;
-        surface->pointsHigh = (uint32_t)size.height;
-        surface->heartbeat = NSProcessInfo.processInfo.systemUptime;
-        surface->visible = 1;
-        ++surface->sequence;
-        [mapping unlock];
+        [self publishPixels:CGBitmapContextGetData(context) width:width height:height points:size];
     }
 }
 - (void)releaseInput {

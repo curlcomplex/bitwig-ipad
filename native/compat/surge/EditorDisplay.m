@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 
 typedef void (*DisplayCallback)(uint32_t, uint32_t, void *);
 
@@ -53,4 +54,18 @@ int32_t CGDisplayRemoveReconfigurationCallback(DisplayCallback callback, void *c
         return 0;
     }
     return 1001;
+}
+
+extern uint32_t CGMainDisplayID(void);
+
+int32_t CGDisplayHideCursor(uint32_t display) {
+    if (display != CGMainDisplayID()) return 1001;
+    ((void (*)(id, SEL))objc_msgSend)(NSClassFromString(@"NSCursor"), @selector(hide));
+    return 0;
+}
+
+int32_t CGDisplayShowCursor(uint32_t display) {
+    if (display != CGMainDisplayID()) return 1001;
+    ((void (*)(id, SEL))objc_msgSend)(NSClassFromString(@"NSCursor"), @selector(unhide));
+    return 0;
 }

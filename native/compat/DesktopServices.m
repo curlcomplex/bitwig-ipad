@@ -98,6 +98,10 @@ int32_t UCKeyTranslate(const void *layout,uint16_t key,uint16_t action,uint32_t 
 }
 
 uint32_t CGMainDisplayID(void) { return 1; }
+size_t CGDisplayPixelsHigh(uint32_t display) {
+    return display == CGMainDisplayID() ? (size_t)UIScreen.mainScreen.nativeBounds.size.height : 0;
+}
+
 uint32_t CGDisplayPrimaryDisplay(uint32_t display) { return display==1?1:0; }
 int32_t CGGetActiveDisplayList(uint32_t capacity,uint32_t *displays,uint32_t *count) { if(!count) return 1001;*count=1;if(capacity&&displays) displays[0]=1;return 0; }
 CGSize CGDisplayScreenSize(uint32_t display) {

@@ -169,6 +169,7 @@ BW_TRACE_MISSING_SELECTOR
 @property(nonatomic) CGPoint locationInWindow;
 @property(nonatomic) NSTimeInterval timestamp;
 @property(nonatomic) NSInteger type;
+@property(nonatomic) short subtype;
 @property(nonatomic) NSInteger clickCount;
 @property(nonatomic) NSInteger buttonNumber;
 @property(nonatomic) NSUInteger modifierFlags;
@@ -245,6 +246,12 @@ BOOL BWDeliverDetachedEditorPointerWithModifiers(UIView *view, CGPoint point, CG
     if (type == 4) pressedMouseButtons &= ~(NSUInteger)2;
     NSEvent *event = [NSEvent new];
     event.type = type;
+#if BW_IPLUG_EDITOR
+    extern BOOL BWIsNAMEditorView(UIView *view);
+    // The remote viewport sends absolute touch coordinates. Tell iPlug2
+    // that these are tablet points so it does not warp an AppKit cursor.
+    if (BWIsNAMEditorView(view)) event.subtype = 1;
+#endif
     event.clickCount = 1;
     event.buttonNumber = type == 3 || type == 4 || type == 7 ? 1 : 0;
     event.modifierFlags = modifiers;
@@ -288,11 +295,19 @@ BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short key
     if((self=[super init])){_rect=rect;_options=options;_owner=owner;_userInfo=info;}return self;
 }
 @end
-#if BW_VSTGUI_EDITOR
-static char BWVSTGUIParentKey;
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+static char BWDetachedEditorParentKey;
 
-static BOOL BWIsVSTGUIEditor(UIView *view) {
+static BOOL BWIsDetachedEditor(UIView *view) {
+#if BW_IPLUG_EDITOR
+    extern BOOL BWIsNAMEditorView(UIView *view);
+    if (BWIsNAMEditorView(view)) return YES;
+#endif
+#if BW_VSTGUI_EDITOR
     return [NSStringFromClass(view.class) isEqualToString:@"VSTGUI_NSView"];
+#else
+    return NO;
+#endif
 }
 
 static BOOL BWIsEngineExtension(void) {
@@ -327,6 +342,14 @@ static BOOL BWIsEngineExtension(void) {
 @implementation NSView {
     CGRect _drawingRect;
 }
+#if BW_IPLUG_EDITOR
+extern void BWPrepareNAMView(UIView *view);
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    BWPrepareNAMView(self);
+    return self;
+}
+#endif
 BW_TRACE_MISSING_SELECTOR
 // AppKit's base live-resize notifications have no effect on an ordinary
 // view. The UIKit scene still owns the actual layout and geometry updates.
@@ -382,26 +405,27 @@ BW_TRACE_MISSING_SELECTOR
     if (rects) *rects = &_drawingRect;
     if (count) *count = CGRectIsEmpty(_drawingRect) ? 0 : 1;
 }
-#if BW_VSTGUI_EDITOR
-- (void)addDetachedVSTGUIView:(UIView *)view {
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+- (void)addDetachedEditorView:(UIView *)view {
     [super addSubview:view];
 }
 
 - (void)addSubview:(UIView *)view {
-    if (!BWIsVSTGUIEditor(view) || !BWIsEngineExtension()) {
+    if (!BWIsDetachedEditor(view) || !BWIsEngineExtension()) {
         [super addSubview:view];
         return;
     }
     // IPlugView attached has already created the vendor view. Keep the
     // vendor's view hierarchy off UIKit's scene-less desktop window.
-    NSView *parent = objc_getAssociatedObject(self, &BWVSTGUIParentKey);
+    NSView *parent = objc_getAssociatedObject(self, &BWDetachedEditorParentKey);
     if (!parent) {
         parent = [[NSView alloc] initWithFrame:view.bounds];
-        objc_setAssociatedObject(self, &BWVSTGUIParentKey, parent, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(self, &BWDetachedEditorParentKey, parent, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     parent.frame = view.bounds;
-    [parent addDetachedVSTGUIView:view];
-    fprintf(stderr, "VSTGUI editor attached to detached parent %.0fx%.0f\n", view.bounds.size.width, view.bounds.size.height);
+    [parent addDetachedEditorView:view];
+    fprintf(stderr, "%s editor attached to detached parent %.0fx%.0f\n",
+            object_getClassName(view), view.bounds.size.width, view.bounds.size.height);
 }
 #endif
 - (void)viewDidChangeBackingProperties {}
@@ -990,15 +1014,15 @@ static void BWUseDesktopWindowDragOrigin(Class recognizerClass) {
     });
 }
 
-#if BW_VSTGUI_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
 extern id BWPublishDetachedEditorView(UIView *view, dispatch_block_t close);
 extern void BWStopPublishingDetachedEditor(id publisher);
 
-static UIView *BWVSTGUIChild(UIView *view) {
-    UIView *detachedParent = objc_getAssociatedObject(view, &BWVSTGUIParentKey);
-    if (BWIsVSTGUIEditor(detachedParent.subviews.firstObject)) return detachedParent.subviews.firstObject;
+static UIView *BWDetachedEditorChild(UIView *view) {
+    UIView *detachedParent = objc_getAssociatedObject(view, &BWDetachedEditorParentKey);
+    if (BWIsDetachedEditor(detachedParent.subviews.firstObject)) return detachedParent.subviews.firstObject;
     for (UIView *child in view.subviews) {
-        UIView *editor = BWVSTGUIChild(child);
+        UIView *editor = BWDetachedEditorChild(child);
         if (editor) return editor;
     }
     return nil;
@@ -1025,8 +1049,8 @@ static UIView *BWVSTGUIChild(UIView *view) {
 @property(nonatomic) CGRect requestedFrame;
 @property(nonatomic) BOOL requestedFullScene;
 @property(nonatomic) BOOL hasBeenShown;
-#if BW_VSTGUI_EDITOR
-@property(nonatomic, strong) id vstguiPublisher;
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+@property(nonatomic, strong) id detachedEditorPublisher;
 #endif
 // Desktop policy hints retained for callers. UIKit owns scene movement,
 // capture policy and background hiding; these hints cannot override it.
@@ -1182,26 +1206,27 @@ BW_TRACE_MISSING_SELECTOR
 - (CGFloat)backingScaleFactor { return self.uiWindow.screen.scale; }
 - (CGRect)convertRectToBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(scale,scale)); }
 - (CGRect)convertRectFromBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(1/scale,1/scale)); }
-#if BW_VSTGUI_EDITOR
-- (BOOL)publishVSTGUIEditor {
-    if (self.vstguiPublisher) return YES;
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+- (BOOL)publishDetachedEditor {
+    if (self.detachedEditorPublisher) return YES;
     if (self.uiWindow.windowScene || !BWIsEngineExtension()) return NO;
-    UIView *editor = BWVSTGUIChild(self.contentView);
+    UIView *editor = BWDetachedEditorChild(self.contentView);
     if (!editor) return NO;
     __weak NSWindow *weakWindow = self;
-    self.vstguiPublisher = BWPublishDetachedEditorView(editor, ^{ [weakWindow performClose:nil]; });
-    if (self.vstguiPublisher) fprintf(stderr, "VSTGUI editor published %.0fx%.0f\n", editor.bounds.size.width, editor.bounds.size.height);
-    return self.vstguiPublisher != nil;
+    self.detachedEditorPublisher = BWPublishDetachedEditorView(editor, ^{ [weakWindow performClose:nil]; });
+    if (self.detachedEditorPublisher) fprintf(stderr, "%s editor published %.0fx%.0f\n",
+                                              object_getClassName(editor), editor.bounds.size.width, editor.bounds.size.height);
+    return self.detachedEditorPublisher != nil;
 }
-- (void)stopPublishingVSTGUIEditor {
-    if (self.vstguiPublisher) BWStopPublishingDetachedEditor(self.vstguiPublisher);
-    self.vstguiPublisher = nil;
+- (void)stopPublishingDetachedEditor {
+    if (self.detachedEditorPublisher) BWStopPublishingDetachedEditor(self.detachedEditorPublisher);
+    self.detachedEditorPublisher = nil;
 }
 #endif
 - (void)makeKeyAndOrderFront:(id)sender {
     self.hasBeenShown=YES;
-#if BW_VSTGUI_EDITOR
-    if ([self publishVSTGUIEditor]) return;
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+    if ([self publishDetachedEditor]) return;
 #endif
     BOOL wasKey=self.uiWindow.isKeyWindow;
     [self.uiWindow makeKeyAndVisible];
@@ -1209,21 +1234,21 @@ BW_TRACE_MISSING_SELECTOR
 }
 - (void)orderFront:(id)sender {
     self.hasBeenShown=YES;
-#if BW_VSTGUI_EDITOR
-    if ([self publishVSTGUIEditor]) return;
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+    if ([self publishDetachedEditor]) return;
 #endif
     self.uiWindow.hidden=NO;
 }
 - (void)orderFrontRegardless { [self orderFront:nil]; }
 - (void)orderOut:(id)sender {
-#if BW_VSTGUI_EDITOR
-    [self stopPublishingVSTGUIEditor];
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+    [self stopPublishingDetachedEditor];
 #endif
     self.uiWindow.hidden=YES;
 }
 - (void)close {
-#if BW_VSTGUI_EDITOR
-    [self stopPublishingVSTGUIEditor];
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+    [self stopPublishingDetachedEditor];
 #endif
     [self.contentView cancelActiveContacts]; self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self];
 }
@@ -1234,8 +1259,8 @@ BW_TRACE_MISSING_SELECTOR
     [self close];
 }
 - (BOOL)isVisible {
-#if BW_VSTGUI_EDITOR
-    if (self.vstguiPublisher) return YES;
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+    if (self.detachedEditorPublisher) return YES;
 #endif
     return self.uiWindow && !self.uiWindow.hidden;
 }

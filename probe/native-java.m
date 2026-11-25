@@ -152,10 +152,12 @@ static void runJava(void) {
         NSString *location=[localCLAP stringByDeletingLastPathComponent];
         setenv("CLAP_PATH",location.fileSystemRepresentation,1);
     }
-    NSString *localVST3=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/OTT.vst3"];
-    if([NSFileManager.defaultManager fileExistsAtPath:localVST3]){
-        NSString *location=[localVST3 stringByDeletingLastPathComponent];
-        setenv("VST3_PATH",location.fileSystemRepresentation,1);
+    NSString *vstFolder=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
+    for (NSString *name in @[@"OTT.vst3", @"NeuralAmpModeler.vst3"]) {
+        if ([NSFileManager.defaultManager fileExistsAtPath:[vstFolder stringByAppendingPathComponent:name]]) {
+            setenv("VST3_PATH",vstFolder.fileSystemRepresentation,1);
+            break;
+        }
     }
     setenv("JAVA_HOME", home.fileSystemRepresentation, 1);
 #ifdef STATIC_ZERO

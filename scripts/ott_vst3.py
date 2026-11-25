@@ -69,31 +69,39 @@ def stage_ott(source, frameworks, sdk):
             digest(source / OTT_BINARY) != OTT_SHA256):
         raise ValueError('Expected the official universal Xfer OTT 1.3.1 VST3 release')
 
-    destination = frameworks / OTT_BUNDLE
+    return stage_vst3_image(source, frameworks, sdk, OTT_BUNDLE, OTT_BINARY,
+                            'OTT.bundle', BRIDGES, DESKTOP_IMPORTS,
+                            {'/usr/lib/libSystem.B.dylib': '@rpath/libOTTDyldBridge.dylib'})
+
+
+def stage_vst3_image(source, frameworks, sdk, bundle_name, binary, image_name,
+                     bridges, optional_imports, libraries):
+    destination = frameworks / bundle_name
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(source, destination, symlinks=True,
                     ignore=shutil.ignore_patterns('_CodeSignature'))
-    source_copy = destination / OTT_BINARY
-    thin = frameworks.parent / 'ott-arm64'
-    image = frameworks / 'OTT.bundle'
+    source_copy = destination / binary
+    thin = frameworks.parent / f'{image_name}-arm64'
+    image = frameworks / image_name
     invoke('xcrun', 'lipo', source_copy, '-thin', 'arm64', '-output', thin)
-    thin.write_bytes(weaken_imports(bytearray(thin.read_bytes()), DESKTOP_IMPORTS))
+    thin.write_bytes(weaken_imports(bytearray(thin.read_bytes()), optional_imports))
     invoke('xcrun', 'vtool', '-set-build-version', 'ios', '17.0', '27.2',
            '-replace', '-output', image, thin)
     thin.unlink()
     source_copy.unlink()
 
-    changes = ['-change', '/usr/lib/libSystem.B.dylib', '@rpath/libOTTDyldBridge.dylib']
+    changes = [arg for old, new in libraries.items() for arg in ('-change', old, new)]
     for line in subprocess.check_output(['otool', '-L', image], text=True).splitlines()[1:]:
         old = line.strip().split(' (compatibility')[0]
         match = re.match(r'/System/Library/Frameworks/([^/]+)\.framework/', old)
         if not match:
             continue
         framework = match[1]
-        new = BRIDGES.get(framework, f'/System/Library/Frameworks/{framework}.framework/{framework}')
+        new = bridges.get(framework, f'/System/Library/Frameworks/{framework}.framework/{framework}')
         if new.startswith('/System/') and not (sdk / (new.lstrip('/') + '.tbd')).is_file():
-            raise ValueError(f'Missing iOS dependency for OTT: {new}')
+            raise ValueError(f'Missing iOS dependency for {bundle_name}: {new}')
         changes += ['-change', old, new]
     invoke('xcrun', 'install_name_tool', *changes, '-add_rpath', '@loader_path', image)
     invoke('codesign', '--force', '--sign', '-', image)
+    return image
