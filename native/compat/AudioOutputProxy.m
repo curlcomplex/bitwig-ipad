@@ -24,6 +24,7 @@ static void *symbol(const char *name){static void *handle;static dispatch_once_t
 static NSString *ringPath(void){NSURL *group=BWSharedContainerURL();return [[group URLByAppendingPathComponent:@"BitwigUser/Audio/ring.bin"] path];}
 static void *produce(void *context){
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+    if (getenv("BW_DSP_PROFILE")) pthread_setname_np("BWAudioProxy");
     BWOutput *unit=context;BWAudioRing *r=unit->ring;UInt32 frames=MAX(32,MIN(r->bufferFrames,4096)),channels=unit->format.mChannelsPerFrame;
     BOOL planar=unit->format.mFormatFlags&kAudioFormatFlagIsNonInterleaved;
     AudioBufferList *list=calloc(1,offsetof(AudioBufferList,mBuffers)+MAX(channels,1)*sizeof(AudioBuffer));float *storage=calloc(frames*MAX(channels,1),sizeof(float));
