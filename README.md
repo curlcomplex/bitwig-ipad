@@ -2,7 +2,14 @@
 
 An experimental, independent UIKit host for a locally supplied ARM64 Bitwig Studio installation. It runs adapted copies of the original frontend and audio engine with an iOS Java runtime. It is unaffiliated with Bitwig GmbH.
 
-The repository contains development source. The build reads Bitwig and other binary dependencies from local installations, leaves the originals intact, and writes generated apps and diagnostics under ignored directories. The project’s original compatibility code is under MIT. Third-party components and materials retain their applicable terms. [License scope](LICENSE) · [Third-party notices](THIRD_PARTY.md) · [Bitwig terms](https://www.bitwig.com/terms-conditions/)
+**Current implementation:** [`epic/6.1.7-multitouch`](https://github.com/curlcomplex/bitwig-ipad/tree/epic/6.1.7-multitouch). The default branch is an older implementation. Check out the current branch before running either build below.
+
+```sh
+git fetch origin
+git switch epic/6.1.7-multitouch
+```
+
+The repository contains development source. The build reads Bitwig and other binary dependencies from local installations, leaves the originals intact, and writes generated apps and diagnostics under ignored directories. The project’s original compatibility code is under MIT. Third-party components and materials retain their applicable terms. [License scope](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/LICENSE) · [Third-party notices](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md) · [Bitwig terms](https://www.bitwig.com/terms-conditions/)
 
 ## How it works
 
@@ -14,21 +21,23 @@ flowchart LR
     Engine --> Audio["Shared PCM ring and host RemoteIO output"]
 ```
 
-The device host uses an embedded JIT helper with a trusted local developer pairing. The local tunnel is based on **LocalDevVPN by Stossy11 and the SideStore Team**. [Tunnel license and attribution](THIRD_PARTY.md)
+The device host uses an embedded JIT helper with a trusted local developer pairing. The local tunnel is based on **LocalDevVPN by Stossy11 and the SideStore Team**. [Tunnel license and attribution](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md)
 
-## Verified scope
+## Verified on Bitwig Studio 6.1.7
 
-| Setup | Evidence |
+| Area | Evidence |
 | --- | --- |
-| Physical iPad mini A17 Pro, Bitwig 6.1.4 | Original interface, Demo Mode, Poly Synth, clip playback, internal device drag and speaker output were exercised. The integrated JIT remains debugger-assisted. |
-| ARM64 iPad Simulator, Bitwig 6.1.7 | Original Demo interface, editing, menus, touch recognition, gesture cancellation and engine loader startup were exercised. |
-| Physical Bitwig 6.1.7 | Keyboard multitouch was confirmed hands-on. Independent contact release, matched chord PCM and active engine teardown remain unverified. |
+| Touch and windows | The original onscreen keyboard was tested hands-on with multiple fingers on a physical iPad mini A17 Pro. The Simulator exercised independent finger release, scene-switch cancellation, and an Arranger radial-menu gesture. The main workspace fills the scene, and auxiliary dialogs preserve their own size. |
+| Keyboard and mouse | Tested physical secondary click and Cmd+D clip duplication. Caps Lock toggles the original computer MIDI keyboard. A physical A key played and released a note when enabled and stayed quiet when disabled. |
+| Audio and MIDI | Built-in microphone recording with simultaneous speaker output was verified. Audio through a Zoom U-44 was tested hands-on, and its MIDI ports appeared. MIDI data transfer remains untested. A saved clip also played over AirPods in hands-free mode, and a live switch to the speaker and back reconnected the open project. |
+| Projects and recording | A saved, activated project reopened with its instrument and edited MIDI notes intact. The original Master Recording produced a WAV that remained available after reopening and played in Bitwig’s Preview Player. |
+| Original plug-in editors | Scripted input on a physical iPad exercised the current opt-in builds of Surge XT, CHOW Tape Model, Xfer OTT, and Neural Amp Modeler. Parameter edits, Close Plug-in, project save and reopen, and audio playback were checked. NAM also restored a model and impulse response imported through its editor. |
 
-Built-in microphone recording and simultaneous speaker output were verified on a physical iPad. External audio interfaces and live route switching remain unverified. Saving and exporting remain subject to Bitwig activation. Standalone post-reboot launch, third-party plug-ins and some file-picker paths remain unqualified. [Compatibility details and test commands](docs/compatibility.md)
+The device launch is debugger-assisted and uses a trusted local developer pairing. Standalone launch after a reboot remains unverified. Project saving and exporting require the applicable Bitwig activation. [Compatibility details and test commands](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/docs/compatibility.md)
 
 ## Build a Simulator host
 
-Use an Apple-silicon Mac, Xcode with an ARM64 iPad Simulator runtime, Python 3.10+, and a macOS JDK for JNI headers. The current build was checked with Xcode 27.2. Supply a local ARM64 Bitwig Studio 6.1.4 or 6.1.7 app and a compatible iOS Java 25 runtime in `vendor/java25-ios`. The runtime directory needs `lib/`, `conf/`, and `release`. Set `BITWIG_JDK_HOME` to override `JAVA_HOME` and macOS JDK discovery. [Runtime provenance](THIRD_PARTY.md)
+Use an Apple-silicon Mac, Xcode with an ARM64 iPad Simulator runtime, Python 3.10+, and a macOS JDK for JNI headers. The current build was checked with Xcode 27.2. Supply a local ARM64 Bitwig Studio 6.1.4 or 6.1.7 app and a compatible iOS Java 25 runtime in `vendor/java25-ios`. The runtime directory needs `lib/`, `conf/`, and `release`. Set `BITWIG_JDK_HOME` to override `JAVA_HOME` and macOS JDK discovery. [Runtime provenance](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md)
 
 ```sh
 export BITWIG_APP="/path/to/Bitwig Studio 6.1.7.app"
@@ -41,7 +50,7 @@ The builders print their output paths under `build/<version>/<source-key>/`. A r
 
 ## Build for a development iPad
 
-Device builds additionally require XcodeGen, a trusted iPad with Developer Mode enabled, the local helper inputs in [THIRD_PARTY.md](THIRD_PARTY.md), and Apple development signing with the required entitlements. The embedded packet tunnel uses the Network Extensions capability, which requires a supported paid program membership. The host and engine extension must both have access to the two registered App Groups. [Apple capability matrix](https://developer.apple.com/help/account/reference/supported-capabilities-ios/) · [App Group entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups)
+Device builds additionally require XcodeGen, a trusted iPad with Developer Mode enabled, the local helper inputs in [THIRD_PARTY.md](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md), and Apple development signing with the required entitlements. The embedded packet tunnel uses the Network Extensions capability, which requires a supported paid program membership. The host and engine extension must both have access to the two registered App Groups. [Apple capability matrix](https://developer.apple.com/help/account/reference/supported-capabilities-ios/) · [App Group entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups)
 
 Set these variables locally for your own provisioning. The bundle suffixes for the app, engine, JIT helper and tunnel derive from one prefix. Keep the existing prefix and groups when updating an install.
 
@@ -64,26 +73,30 @@ Use the same `BITWIG_APP` and identity configuration for all three commands. The
 
 File → Save stores new projects in `BitwigUser/Projects` in the app's shared container. Reopen them from Recent Projects on the Bitwig Dashboard. Use the master meter's record button to capture the master output, and the adjacent folder button to open the project's `master-recordings` folder and preview the recording.
 
-## Experimental Surge XT CLAP
+## Experimental original plug-in editors
 
-Pass `--surge-clap "/path/to/Surge XT.clap"` to the iPad build with `--embedded-engine` to include a private copy of the supported Surge XT 1.3.4 desktop release. The build checks the original image, adapts its ARM64 slice, and signs it locally. In Bitwig Settings → Plug-ins, choose **with Bitwig** to use the audio engine's CLAP host. This build uses Bitwig's device parameters by default.
+The following opt-ins use matching locally installed desktop plug-ins. In Bitwig Settings → Plug-ins, select **with Bitwig**.
 
-On a physical iPad, Bitwig reopened a saved Surge project with its MIDI clip and two edited macro values restored at Surge's saved precision. The original engine played the clip through the built-in speaker with zero reported output errors or underruns. The saved clip also played on AirPods in Bluetooth hands-free mode at 24 kHz hardware and 48 kHz client audio. A live switch to the iPad speaker and back to AirPods also reconnected the open project.
+### Surge XT and CHOW Tape Model CLAP
 
-Run `python3 tests/surge-clap-probe.py --help` for the isolated Simulator check that reads the CLAP descriptor, changes and restores a parameter, and verifies note-on output and note-off release.
+Pass `--surge-clap "/path/to/Surge XT.clap"` to the iPad build with `--embedded-engine` to include a private copy of the supported Surge XT 1.3.4 desktop release. The build checks the original image, adapts its ARM64 slice, and signs it locally. This build uses Bitwig's device parameters by default.
+
+In the scripted iPad check, Surge’s original editor accepted Patch Browser text, opened its secondary-click menu, and dismissed the menu on Escape or an outside click. A Macro 1 drag updated Bitwig’s parameter and restored after project reopen. Surge’s original numeric **Edit Value** dialog updates the plug-in’s internal macro without sending the host notification that its drag path sends.
+
+Run `python3 tests/surge-clap-probe.py --help` using the [Surge CLAP probe](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/tests/surge-clap-probe.py) for the isolated Simulator check that reads the CLAP descriptor, changes and restores a parameter, and verifies note-on output and note-off release.
 
 The opt-in `--surge-editor-clap-include /path/to/clap/include` build enables the original Surge editor. The engine renders the live plug-in instance and the foreground app relays touches from its editor panel. The panel routes hardware keys and secondary clicks to the original editor. Surge’s context menus stay within the editor panel at the same scale. The same CLAP SDK include directory is used by `tests/surge-clap-probe.py --editor`, which checks isolated drawing, parameter edits, resizing, and cleanup alongside state and audio. Physical editor integration is experimental.
 
 The same probe accepts `--chow-editor` with the official CHOW Tape Model 2.11.0 desktop CLAP to exercise the shared editor adapter with a second JUCE plug-in in Simulator. Add `--chow-clap "/path/to/CHOWTapeModel.clap"` to the same iPad editor build to package that release alongside Surge XT.
 
-## Experimental Xfer OTT VST3
+### Xfer OTT VST3
 
-Pass `--ott-vst3 "/path/to/OTT.vst3"` to the build with `--device`, `--embedded-engine` and a supported local installation of Xfer OTT 1.3.1. The build adapts the original ARM64 executable, keeps the original editor resources and signs the private copy locally. In Bitwig Settings → Plug-ins, choose **with Bitwig**. Find OTT from Xfer Records under Audio FX and open its native editor from the device panel.
+Pass `--ott-vst3 "/path/to/OTT.vst3"` to the build with `--device`, `--embedded-engine` and a supported local installation of Xfer OTT 1.3.1. The build adapts the original ARM64 executable, keeps the original editor resources and signs the private copy locally. Find OTT from Xfer Records under Audio FX and open its native editor from the device panel.
 
-## Experimental Neural Amp Modeler VST3
+### Neural Amp Modeler VST3
 
-Pass `--nam-vst3 "/path/to/NeuralAmpModeler.vst3"` with `--device` and `--embedded-engine` to include the supported local Neural Amp Modeler 0.7.13 release. Choose **with Bitwig** in Bitwig Settings → Plug-ins. The build adapts the original ARM64 plug-in and compiles its matching upstream MetalNanoVG shader for iPadOS using the Xcode Metal toolchain. The original editor renders with Metal in the engine process and shares its completed frames with the foreground app. Its model and impulse response controls open the iPad Files picker. Selected `.nam` and `.wav` files are copied into the shared Bitwig user directory so saved projects can reopen them.
+Pass `--nam-vst3 "/path/to/NeuralAmpModeler.vst3"` with `--device` and `--embedded-engine` to include the supported local Neural Amp Modeler 0.7.13 release. The build adapts the original ARM64 plug-in and compiles its matching upstream MetalNanoVG shader for iPadOS using the Xcode Metal toolchain. The original editor renders with Metal in the engine process and shares its completed frames with the foreground app. Its model and impulse response controls open the iPad Files picker. Selected `.nam` and `.wav` files are copied into the shared Bitwig user directory so saved projects can reopen them. The physical check presented the real Files picker and used scripted selection through its picker callback, then verified both assets after reopening the project.
 
 ## Source checks
 
-Run `python3 tests/local-config.py` for configuration validation and `python3 scripts/check-public-source.py` to check a committed snapshot for unexpected file types and common private-data patterns. The check reports categories only. It does not inspect external files or earlier history. Build artifacts and compatibility reports stay local. [Compatibility inventory, diagnostics, and targeted tests](docs/compatibility.md)
+Run `python3 tests/local-config.py` for [configuration validation](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/tests/local-config.py) and `python3 scripts/check-public-source.py` to [check a committed snapshot](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/scripts/check-public-source.py) for unexpected file types and common private-data patterns. The check reports categories only. It does not inspect external files or earlier history. Build artifacts and compatibility reports stay local. [Compatibility inventory, diagnostics, and targeted tests](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/docs/compatibility.md)
