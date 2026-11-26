@@ -2,7 +2,7 @@
 import plistlib
 from pathlib import Path
 
-from ott_vst3 import stage_vst3_image
+from ott_vst3 import stage_desktop_plugin_image
 from surge_clap import digest, invoke
 
 NAM_BUNDLE = 'NeuralAmpModeler.vst3'
@@ -35,7 +35,7 @@ def stage_nam(source, frameworks, sdk):
             info.get('CFBundleIdentifier') != 'com.StevenAtkinson.vst3.NeuralAmpModeler' or
             digest(source / NAM_BINARY) != NAM_SHA256):
         raise ValueError('Expected the official universal Neural Amp Modeler 0.7.13 VST3 release')
-    return stage_vst3_image(source, frameworks, sdk, NAM_BUNDLE, NAM_BINARY,
+    return stage_desktop_plugin_image(source, frameworks, sdk, NAM_BUNDLE, NAM_BINARY,
                             'NeuralAmpModeler.bundle', BRIDGES, OPTIONAL_EDITOR_IMPORTS,
                             {'/usr/lib/libSystem.B.dylib': '@rpath/libNAMSystemBridge.dylib'})
 

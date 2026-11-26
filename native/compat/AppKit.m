@@ -188,6 +188,10 @@ BW_TRACE_MISSING_SELECTOR
 @end
 @implementation NSEvent
 BW_TRACE_MISSING_SELECTOR
+#if BW_FABFILTER_EDITOR
+// Desktop plug-ins use this convention for the interval between pointer edges.
++ (NSTimeInterval)doubleClickInterval { return 0.5; }
+#endif
 + (instancetype)mouseEventWithType:(NSUInteger)type location:(CGPoint)location modifierFlags:(NSUInteger)flags timestamp:(NSTimeInterval)timestamp windowNumber:(NSInteger)number context:(id)context eventNumber:(NSInteger)eventNumber clickCount:(NSInteger)clickCount pressure:(float)pressure {
     NSEvent *event=[self new];event.type=type;event.locationInWindow=location;event.modifierFlags=flags;event.timestamp=timestamp;
     event.context=context;event.eventNumber=eventNumber;event.clickCount=clickCount;event.pressure=pressure;
@@ -295,10 +299,14 @@ BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short key
     if((self=[super init])){_rect=rect;_options=options;_owner=owner;_userInfo=info;}return self;
 }
 @end
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
 static char BWDetachedEditorParentKey;
 
 static BOOL BWIsDetachedEditor(UIView *view) {
+#if BW_FABFILTER_EDITOR
+    extern BOOL BWIsFabFilterEditorView(UIView *view);
+    if (BWIsFabFilterEditorView(view)) return YES;
+#endif
 #if BW_IPLUG_EDITOR
     extern BOOL BWIsNAMEditorView(UIView *view);
     if (BWIsNAMEditorView(view)) return YES;
@@ -311,7 +319,7 @@ static BOOL BWIsDetachedEditor(UIView *view) {
 }
 
 #endif
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_JUCE_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR || BW_JUCE_EDITOR
 static BOOL BWIsEngineExtension(void) {
     NSDictionary *extension = [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSExtension"];
     return [extension[@"NSExtensionPrincipalClass"] isEqualToString:@"NativeEngineHandler"];
@@ -449,7 +457,7 @@ BW_TRACE_MISSING_SELECTOR
     if (rects) *rects = &_drawingRect;
     if (count) *count = CGRectIsEmpty(_drawingRect) ? 0 : 1;
 }
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
 - (void)addDetachedEditorView:(UIView *)view {
     [super addSubview:view];
 }
@@ -1063,7 +1071,7 @@ static void BWUseDesktopWindowDragOrigin(Class recognizerClass) {
     });
 }
 
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
 extern id BWPublishDetachedEditorView(UIView *view, dispatch_block_t close);
 extern void BWStopPublishingDetachedEditor(id publisher);
 
@@ -1102,7 +1110,7 @@ static UIView *BWDetachedEditorChild(UIView *view) {
 #if BW_JUCE_EDITOR
 @property(nonatomic, strong) id detachedJucePopup;
 #endif
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
 @property(nonatomic, strong) id detachedEditorPublisher;
 #endif
 // Desktop policy hints retained for callers. UIKit owns scene movement,
@@ -1123,7 +1131,38 @@ static UIView *BWDetachedEditorChild(UIView *view) {
 @property(nonatomic) NSUInteger sharingType;
 @property(nonatomic,copy) NSArray *registeredDraggedTypes;
 @end
+#if BW_FABFILTER_EDITOR
+static void BWDetachedScreenFlush(NSWindow *window, SEL selector) {
+    // The detached engine window has no screen updates to defer or backing
+    // store to flush. The publisher transfers the next completed frame.
+    if (window.uiWindow.windowScene) [window doesNotRecognizeSelector:selector];
+}
+
+static void BWDisplayDetachedPluginWindow(NSWindow *window, SEL selector) {
+    if (window.uiWindow.windowScene) {
+        [window doesNotRecognizeSelector:selector];
+        return;
+    }
+    [window.contentView displayIfNeeded];
+}
+#endif
+
 @implementation NSWindow
+#if BW_FABFILTER_EDITOR
++ (BOOL)resolveInstanceMethod:(SEL)selector {
+    if (self == NSClassFromString(@"CocoaPluginWindow") && BWIsEngineExtension()) {
+        IMP implementation = NULL;
+        if (selector == @selector(disableScreenUpdatesUntilFlush) || selector == @selector(flushWindowIfNeeded))
+            implementation = (IMP)BWDetachedScreenFlush;
+        else if (selector == @selector(displayIfNeeded))
+            implementation = (IMP)BWDisplayDetachedPluginWindow;
+        if (implementation)
+            return class_addMethod(self, selector, implementation, "v@:") ||
+                class_getInstanceMethod(self, selector) != NULL;
+    }
+    return [super resolveInstanceMethod:selector];
+}
+#endif
 BW_TRACE_MISSING_SELECTOR
 - (id)initWithContentRect:(CGRect)rect styleMask:(NSUInteger)style backing:(NSUInteger)backing defer:(BOOL)defer screen:(NSScreen*)screen {
     return [self initWithContentRect:rect styleMask:style backing:backing defer:defer];
@@ -1270,7 +1309,7 @@ BW_TRACE_MISSING_SELECTOR
 - (CGFloat)backingScaleFactor { return self.uiWindow.screen.scale; }
 - (CGRect)convertRectToBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(scale,scale)); }
 - (CGRect)convertRectFromBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(1/scale,1/scale)); }
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
 - (BOOL)publishDetachedEditor {
     if (self.detachedEditorPublisher) return YES;
     if (self.uiWindow.windowScene || !BWIsEngineExtension()) return NO;
@@ -1309,7 +1348,7 @@ BW_TRACE_MISSING_SELECTOR
 #if BW_JUCE_EDITOR
     if ([self publishDetachedJucePopup]) return;
 #endif
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
     if ([self publishDetachedEditor]) return;
 #endif
     BOOL wasKey=self.uiWindow.isKeyWindow;
@@ -1321,7 +1360,7 @@ BW_TRACE_MISSING_SELECTOR
 #if BW_JUCE_EDITOR
     if ([self publishDetachedJucePopup]) return;
 #endif
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
     if ([self publishDetachedEditor]) return;
 #endif
     self.uiWindow.hidden=NO;
@@ -1331,7 +1370,7 @@ BW_TRACE_MISSING_SELECTOR
 #if BW_JUCE_EDITOR
     [self stopPublishingDetachedJucePopup];
 #endif
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
     [self stopPublishingDetachedEditor];
 #endif
     self.uiWindow.hidden=YES;
@@ -1340,7 +1379,7 @@ BW_TRACE_MISSING_SELECTOR
 #if BW_JUCE_EDITOR
     [self stopPublishingDetachedJucePopup];
 #endif
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
     [self stopPublishingDetachedEditor];
 #endif
     [self.contentView cancelActiveContacts]; self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self];
@@ -1355,7 +1394,7 @@ BW_TRACE_MISSING_SELECTOR
 #if BW_JUCE_EDITOR
     if (self.detachedJucePopup) return YES;
 #endif
-#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
     if (self.detachedEditorPublisher) return YES;
 #endif
     return self.uiWindow && !self.uiWindow.hidden;
@@ -1834,8 +1873,65 @@ BW_TRACE_MISSING_SELECTOR
 @property(nonatomic,weak) id delegate;
 - (UIMenu*)uiMenu;
 @end
+#if BW_FABFILTER_EDITOR
+#import "fabfilter/Menu.h"
+
+static NSArray<NSDictionary *> *BWFabFilterMenuItems(NSMenu *menu, NSMutableArray<NSMenuItem *> *retained,
+                                                     NSHashTable<NSMenu *> *ancestors) {
+    if ([ancestors containsObject:menu]) return @[];
+    [ancestors addObject:menu];
+    NSMutableArray *items = [NSMutableArray new];
+    for (NSMenuItem *item in menu.items.copy) {
+        if (item.hidden) continue;
+        if (item.separatorItem) {
+            [items addObject:@{@"separator":@YES}];
+            continue;
+        }
+        NSUInteger index = retained.count;
+        [retained addObject:item];
+        NSMutableDictionary *entry = [@{@"index":@(index), @"title":item.title ?: @"",
+                                         @"enabled":@(item.enabled), @"state":@(item.state)} mutableCopy];
+        if (item.submenu) {
+            entry[@"children"] = BWFabFilterMenuItems(item.submenu, retained, ancestors);
+            if (![entry[@"children"] count]) entry[@"enabled"] = @NO;
+        }
+        [items addObject:entry];
+    }
+    [ancestors removeObject:menu];
+    return items;
+}
+#endif
+
 @implementation NSMenu
 BW_TRACE_MISSING_SELECTOR
+#if BW_FABFILTER_EDITOR
+- (BOOL)popUpMenuPositioningItem:(NSMenuItem *)positioningItem atLocation:(CGPoint)point inView:(UIView *)view {
+    if (!BWIsEngineExtension() || !BWIsDetachedEditor(view)) return NO;
+    NSMutableArray<NSMenuItem *> *retained = [NSMutableArray new];
+    NSArray *items = BWFabFilterMenuItems(self, retained, [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality]);
+    NSUInteger index = positioningItem ? [retained indexOfObjectIdenticalTo:positioningItem] : NSNotFound;
+    NSInteger selection = -1;
+    if (!BWRunFabFilterMenu(view, point, items, index == NSNotFound ? nil : @(index), &selection) ||
+        (NSUInteger)selection >= retained.count) return NO;
+
+    NSMenuItem *item = retained[(NSUInteger)selection];
+    SEL action = item.action;
+    if (!action || !item.enabled || item.hidden || item.submenu || item.separatorItem) return NO;
+    id target = item.target;
+    if (!target) {
+        for (UIResponder *responder = view; responder; responder = responder.nextResponder) {
+            if (![responder respondsToSelector:action]) continue;
+            target = responder;
+            break;
+        }
+        if (!target && [NSApp respondsToSelector:action]) target = NSApp;
+        if (!target && [[NSApp delegate] respondsToSelector:action]) target = [NSApp delegate];
+    }
+    if (![target respondsToSelector:action]) return NO;
+    ((void (*)(id, SEL, id))objc_msgSend)(target, action, item);
+    return YES;
+}
+#endif
 - (id)initWithTitle:(NSString*)title { if((self=[super init])){_title=[title copy];_items=[NSMutableArray new];}return self; }
 - (NSArray*)itemArray { return self.items.copy; }
 - (NSInteger)numberOfItems { return self.items.count; }
@@ -1874,6 +1970,7 @@ void BWUIKitBuildMenu(id<UIMenuBuilder> builder) {
 
 // Explicitly enabled development input, confined to our Bitwig windows. This
 // exercises the original mouse handlers; it is not a hardware-touch test.
+
 void BWUIKitPollTestInput(void) {
     NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
     NSString *path=[documents stringByAppendingPathComponent:@"native-ui-command.json"];

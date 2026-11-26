@@ -147,15 +147,14 @@ static void runJava(void) {
     dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
     if(!prepared){report[@"phase"]=@"embedded JIT unavailable";save();return;}
 #endif
-    NSString *localCLAP=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/Surge XT.clap"];
-    if([NSFileManager.defaultManager fileExistsAtPath:localCLAP]){
-        NSString *location=[localCLAP stringByDeletingLastPathComponent];
-        setenv("CLAP_PATH",location.fileSystemRepresentation,1);
-    }
-    NSString *vstFolder=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
+    NSString *pluginFolder=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
+    NSFileManager *files = NSFileManager.defaultManager;
+    if ([files fileExistsAtPath:[pluginFolder stringByAppendingPathComponent:@"Surge XT.clap"]] ||
+        [files fileExistsAtPath:[pluginFolder stringByAppendingPathComponent:@"fabfilter-clap.json"]])
+        setenv("CLAP_PATH", pluginFolder.fileSystemRepresentation, 1);
     for (NSString *name in @[@"OTT.vst3", @"NeuralAmpModeler.vst3"]) {
-        if ([NSFileManager.defaultManager fileExistsAtPath:[vstFolder stringByAppendingPathComponent:name]]) {
-            setenv("VST3_PATH",vstFolder.fileSystemRepresentation,1);
+        if ([NSFileManager.defaultManager fileExistsAtPath:[pluginFolder stringByAppendingPathComponent:name]]) {
+            setenv("VST3_PATH",pluginFolder.fileSystemRepresentation,1);
             break;
         }
     }

@@ -35,6 +35,31 @@ int32_t ConvertFromUnicodeToText(void *info,uint32_t inputBytes,const UniChar *i
 // FSRef is an opaque 80-byte value. References issued here resolve to paths in
 // the iOS app's standard directories; no desktop filesystem is fabricated.
 static NSMutableArray<NSString*> *folderPaths;
+int32_t BWStoreFSRef(NSString *path, void *ref) {
+    if (!path || !ref) return -50;
+    @synchronized(NSFileManager.class) {
+        if (!folderPaths) folderPaths = [NSMutableArray new];
+        NSUInteger index = [folderPaths indexOfObject:path];
+        if (index == NSNotFound) {
+            index = folderPaths.count;
+            [folderPaths addObject:path];
+        }
+        uint64_t token[2] = {0x4257465352454631,index};
+        memset(ref,0,80);
+        memcpy(ref,token,sizeof(token));
+    }
+    return 0;
+}
+NSString *BWPathForFSRef(const void *ref) {
+    if (!ref) return nil;
+    uint64_t token[2];
+    memcpy(token,ref,sizeof(token));
+    @synchronized(NSFileManager.class) {
+        if (token[0] != 0x4257465352454631 || token[1] >= folderPaths.count) return nil;
+        return folderPaths[token[1]];
+    }
+}
+
 int32_t FSFindFolder(int16_t domain,uint32_t type,unsigned char create,void *ref) {
     if(!ref) return -50;
     NSString *path=nil;
@@ -53,23 +78,15 @@ int32_t FSFindFolder(int16_t domain,uint32_t type,unsigned char create,void *ref
     if(!path) return -43;
     if(create&&![NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]) return -54;
     if(![NSFileManager.defaultManager fileExistsAtPath:path]) return -43;
-    @synchronized(NSFileManager.class) {
-        if(!folderPaths) folderPaths=[NSMutableArray new];
-        [folderPaths addObject:path];
-        uint64_t token[2]={0x4257465352454631,folderPaths.count-1};
-        memset(ref,0,80);memcpy(ref,token,sizeof(token));
-    }
-    return 0;
+    return BWStoreFSRef(path,ref);
 }
 int32_t FSRefMakePath(const void *ref,unsigned char *buffer,uint32_t capacity) {
-    if(!ref||!buffer) return -50;
-    uint64_t token[2];memcpy(token,ref,sizeof(token));
-    @synchronized(NSFileManager.class) {
-        if(token[0]!=0x4257465352454631||token[1]>=folderPaths.count) return -1401;
-        const char *path=folderPaths[token[1]].fileSystemRepresentation;
-        if(strlen(path)+1>capacity) return -2110;
-        memcpy(buffer,path,strlen(path)+1);
-    }
+    if (!ref || !buffer) return -50;
+    NSString *path = BWPathForFSRef(ref);
+    if (!path) return -1401;
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    if (strlen(fileSystemPath)+1>capacity) return -2110;
+    memcpy(buffer,fileSystemPath,strlen(fileSystemPath)+1);
     return 0;
 }
 

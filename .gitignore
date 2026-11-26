@@ -36,6 +36,7 @@ __pycache__/
 !/scripts/surge_clap.py
 !/scripts/ott_vst3.py
 !/scripts/nam_vst3.py
+!/scripts/fabfilter_clap.py
 !/docs/
 /docs/*
 !/docs/compatibility.md
