@@ -36,6 +36,7 @@ id NSApp;
 static NSHashTable *bitwigWindows;
 static NSUInteger pressedMouseButtons;
 static CGPoint mouseScreenLocation;
+static BOOL BWIsCocoaPopupView(UIView *view);
 static NSUInteger currentModifierFlags;
 static UIImage *cursorImage;
 static CGPoint cursorHotSpot;
@@ -649,7 +650,10 @@ BW_TRACE_MISSING_SELECTOR
 - (void)beginContacts:(NSSet<UITouch *> *)touches buttonMask:(UIEventButtonMask)buttonMask {
     static NSUInteger nextIdentity;
     for (UITouch *touch in touches) {
-        if (touch.type == UITouchTypeDirect && self.appKitRecognizers.count) {
+        // Auxiliary Bitwig menus handle continuous desktop controls through
+        // AppKit mouse drags. Latch the existing pointer route on contact.
+        if (touch.type == UITouchTypeDirect && self.appKitRecognizers.count &&
+            !BWIsCocoaPopupView(self)) {
             BWTouchRoute *route = [BWTouchRoute new];
             route.identity = @(++nextIdentity);
             route.point = [touch locationInView:self.window];
@@ -1146,6 +1150,15 @@ static void BWDisplayDetachedPluginWindow(NSWindow *window, SEL selector) {
     [window.contentView displayIfNeeded];
 }
 #endif
+
+static BOOL BWIsCocoaPopupView(UIView *view) {
+    UIWindow *window = view.window;
+    if (![window isKindOfClass:BWUIKitWindow.class]) return NO;
+    NSWindow *desktop = ((BWUIKitWindow *)window).desktopWindow;
+    return desktop.class == NSClassFromString(@"BWWindow") && view.class == NSClassFromString(@"BWView") &&
+        desktop.contentView == view && desktop.styleMask == 0 &&
+        desktop.collectionBehavior == BWWindowFullScreenAuxiliary;
+}
 
 @implementation NSWindow
 #if BW_FABFILTER_EDITOR
