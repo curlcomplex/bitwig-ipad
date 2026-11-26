@@ -5,6 +5,11 @@
 #import "../LocalConfiguration.h"
 #import "../HardwareKeys.h"
 #import "EditorSurface.h"
+#if BW_FABFILTER_EDITOR
+#import "../fabfilter/Menu.h"
+#import <objc/message.h>
+extern BOOL BWIsFabFilterEditorView(UIView *view);
+#endif
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/file.h>
@@ -121,6 +126,72 @@ static void removeDocumentExchange(BWEditorMapping *mapping) {
 - (void)tick;
 - (void)releaseInput;
 @end
+
+#if BW_FABFILTER_EDITOR
+static __weak BWEditorPublisher *fabFilterInputPublisher;
+
+static NSURL *menuURL(BWEditorMapping *mapping, NSString *extension) {
+    return [mapping.url URLByAppendingPathExtension:extension];
+}
+
+static void removeMenuExchange(BWEditorMapping *mapping) {
+    [NSFileManager.defaultManager removeItemAtURL:menuURL(mapping, @"fabfilter-menu") error:nil];
+    [NSFileManager.defaultManager removeItemAtURL:menuURL(mapping, @"fabfilter-selection") error:nil];
+}
+
+BOOL BWRunFabFilterMenu(UIView *view, CGPoint point, NSArray<NSDictionary *> *items,
+                        NSNumber *positioningItem, NSInteger *selection) {
+    BWEditorPublisher *publisher = fabFilterInputPublisher;
+    BWEditorMapping *mapping = publisher.mapping;
+    CGRect bounds = view.bounds;
+    if (!NSThread.isMainThread || !mapping || publisher.view != view || !BWIsFabFilterEditorView(view) ||
+        CGRectIsEmpty(bounds) || !isfinite(point.x) || !isfinite(point.y) || !items.count) return NO;
+
+    CGFloat x = (point.x - CGRectGetMinX(bounds)) / CGRectGetWidth(bounds);
+    CGFloat y = (point.y - CGRectGetMinY(bounds)) / CGRectGetHeight(bounds);
+    SEL flipped = @selector(isFlipped);
+    if ([view respondsToSelector:flipped] && !((BOOL (*)(id, SEL))objc_msgSend)(view, flipped)) y = 1 - y;
+    NSString *identity = NSUUID.UUID.UUIDString;
+    NSURL *request = menuURL(mapping, @"fabfilter-menu");
+    NSURL *result = menuURL(mapping, @"fabfilter-selection");
+    NSDictionary *payload = @{@"id":identity, @"x":@(MIN(MAX(x, 0), 1)), @"y":@(MIN(MAX(y, 0), 1)),
+                              @"items":items, @"positioning":positioningItem ?: @(-1)};
+    [NSFileManager.defaultManager removeItemAtURL:result error:nil];
+    if (![payload writeToURL:request error:nil]) return NO;
+
+    NSString *mode = @"BWDetachedFabFilterMenu";
+    // Running a dedicated mode lets foreground UI respond without reentering
+    // the editor publisher or the vendor mouse callback on the engine thread.
+    NSTimer *timer = [NSTimer timerWithTimeInterval:0.05 repeats:YES block:^(NSTimer *unused) {}];
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:mode];
+    BOOL selected = NO;
+    @try {
+        while (publisher.mapping == mapping) {
+            if ([mapping lock]) {
+                BWEditorSurface *surface = mapping.surface;
+                double now = NSProcessInfo.processInfo.systemUptime;
+                double age = now - surface->foregroundHeartbeat;
+                BOOL active = surface->visible && !surface->closeRequested && !surface->cancelRequested &&
+                              age >= 0 && age < 2;
+                if (active) surface->heartbeat = now;
+                [mapping unlock];
+                if (!active) break;
+            }
+            NSDictionary *answer = [NSDictionary dictionaryWithContentsOfURL:result error:nil];
+            if ([answer[@"id"] isEqual:identity]) {
+                *selection = [answer[@"selection"] integerValue];
+                selected = *selection >= 0;
+                break;
+            }
+            CFRunLoopRunInMode((__bridge CFStringRef)mode, 0.05, false);
+        }
+    } @finally {
+        [timer invalidate];
+        removeMenuExchange(mapping);
+    }
+    return selected;
+}
+#endif
 
 #if BW_IPLUG_EDITOR
 static NSMapTable<UIView *, BWEditorPublisher *> *namPublishers;
@@ -357,7 +428,16 @@ void BWDetachJucePopup(BWJucePopup *popup) {
                 local = CGPointMake(point.x - self.pointerOrigin.x, point.y - self.pointerOrigin.y);
             }
 #endif
-            BOOL delivered = BWDeliverDetachedEditorPointerWithModifiers(pointerView, local, delta, event.phase, event.modifiers);
+            BOOL delivered;
+#if BW_FABFILTER_EDITOR
+            BWEditorPublisher *priorFabFilter = fabFilterInputPublisher;
+            if (BWIsFabFilterEditorView(pointerView)) fabFilterInputPublisher = self;
+            @try {
+#endif
+                delivered = BWDeliverDetachedEditorPointerWithModifiers(pointerView, local, delta, event.phase, event.modifiers);
+#if BW_FABFILTER_EDITOR
+            } @finally { fabFilterInputPublisher = priorFabFilter; }
+#endif
             if (self.mapping != mapping) return;
             if (delivered) {
                 if (begins) {
@@ -495,6 +575,12 @@ static id publishEditor(UIView *parent, UIView *view, dispatch_block_t close) {
     BWEditorPublisher *publisher = [BWEditorPublisher new];
     publisher.parent = parent;
     publisher.view = view;
+#if BW_FABFILTER_EDITOR
+    if (BWIsFabFilterEditorView(view) && [mapping lock]) {
+        mapping.surface->fabFilter = 1;
+        [mapping unlock];
+    }
+#endif
     publisher.mapping = mapping;
 #if BW_JUCE_EDITOR
     if (trackJuceView(parent.subviews.firstObject, publisher)) {
@@ -544,6 +630,9 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
         [namPublishers removeObjectForKey:publisher.view];
     removeDocumentExchange(mapping);
 #endif
+#if BW_FABFILTER_EDITOR
+    if (BWIsFabFilterEditorView(publisher.view)) removeMenuExchange(mapping);
+#endif
     [publisher releaseInput];
 #if BW_JUCE_EDITOR
     for (BWJucePopup *popup in publisher.jucePopups.copy) BWDetachJucePopup(popup);
@@ -590,6 +679,14 @@ static CGRect constrainEditorFrame(CGRect frame, CGRect area) {
 @property(nonatomic) CGSize editorSize;
 @property(nonatomic) BOOL closing;
 @property(nonatomic, weak) UIResponder *priorResponder;
+#if BW_FABFILTER_EDITOR
+@property(nonatomic) BOOL fabFilter;
+@property(nonatomic, weak) UIViewController *fabFilterMenu;
+@property(nonatomic, copy) NSString *fabFilterMenuIdentity;
+@property(nonatomic, copy) NSString *fabFilterFailedReply;
+- (void)pollFabFilterMenu;
+- (void)cancelFabFilterMenu;
+#endif
 #if BW_IPLUG_EDITOR
 @property(nonatomic, strong) id documentPicker;
 - (void)pollDocument;
@@ -842,6 +939,46 @@ static CGRect constrainEditorFrame(CGRect frame, CGRect area) {
     [self.heldKeys removeAllObjects];
     return YES;
 }
+#if BW_FABFILTER_EDITOR
+- (void)replyToFabFilterMenu:(NSString *)identity selection:(NSInteger)selection {
+    NSURL *request = menuURL(self.mapping, @"fabfilter-menu");
+    NSDictionary *pending = [NSDictionary dictionaryWithContentsOfURL:request error:nil];
+    if (![pending[@"id"] isEqual:identity]) return;
+    NSURL *result = menuURL(self.mapping, @"fabfilter-selection");
+    NSDictionary *answer = @{@"id":identity, @"selection":@(selection)};
+    if (![answer writeToURL:result error:nil]) self.fabFilterFailedReply = identity;
+}
+- (void)cancelFabFilterMenu {
+    if (self.fabFilterMenuIdentity) [self replyToFabFilterMenu:self.fabFilterMenuIdentity selection:-1];
+    [self.fabFilterMenu dismissViewControllerAnimated:NO completion:nil];
+    self.fabFilterMenu = nil;
+    self.fabFilterMenuIdentity = nil;
+}
+- (void)pollFabFilterMenu {
+    NSURL *request = menuURL(self.mapping, @"fabfilter-menu");
+    NSDictionary *payload = [NSDictionary dictionaryWithContentsOfURL:request error:nil];
+    NSString *identity = payload[@"id"];
+    BOOL active = !self.closing && self.window.windowScene.activationState == UISceneActivationStateForegroundActive;
+    if (!active || !identity || ![identity isEqualToString:self.fabFilterMenuIdentity]) [self cancelFabFilterMenu];
+    if (self.fabFilterFailedReply) {
+        if (![self.fabFilterFailedReply isEqualToString:identity]) self.fabFilterFailedReply = nil;
+        else if ([self.mapping lock]) {
+            self.mapping.surface->cancelRequested = 1;
+            [self.mapping unlock];
+            self.fabFilterFailedReply = nil;
+        }
+        return;
+    }
+    if (!active || !identity || self.fabFilterMenuIdentity) return;
+
+    __weak BWEditorViewport *weakSelf = self;
+    void (^reply)(NSInteger) = ^(NSInteger selection) { [weakSelf replyToFabFilterMenu:identity selection:selection]; };
+    self.fabFilterMenuIdentity = identity;
+    CGPoint point = CGPointMake([payload[@"x"] doubleValue], [payload[@"y"] doubleValue]);
+    self.fabFilterMenu = BWPresentFabFilterMenu(self.image, point, payload[@"items"], payload[@"positioning"], reply);
+    if (!self.fabFilterMenu) reply(-1);
+}
+#endif
 #if BW_IPLUG_EDITOR
 - (void)pollDocument {
     if (self.documentPicker || self.closing) return;
@@ -878,6 +1015,11 @@ static CGRect constrainEditorFrame(CGRect frame, CGRect area) {
         return NO;
     }
     if (self.closing) surface->closeRequested = 1;
+#if BW_FABFILTER_EDITOR
+    self.fabFilter = surface->fabFilter;
+    if (self.fabFilter && self.window.isKeyWindow && self.window.windowScene.activationState == UISceneActivationStateForegroundActive)
+        surface->foregroundHeartbeat = NSProcessInfo.processInfo.systemUptime;
+#endif
     uint8_t count = 0;
     while (surface->pointerCount < BWEditorPointerCapacity && count < self.pending.count) {
         NSUInteger index = (surface->pointerRead + surface->pointerCount++) % BWEditorPointerCapacity;
@@ -974,6 +1116,9 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
         BWEditorViewport *viewport = viewports[url];
         if ([viewport refresh]) {
             [viewport updateHostGeometry];
+#if BW_FABFILTER_EDITOR
+            if (viewport.fabFilter) [viewport pollFabFilterMenu];
+#endif
 #if BW_IPLUG_EDITOR
             [viewport pollDocument];
 #endif
@@ -981,6 +1126,9 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
         }
 #if BW_IPLUG_EDITOR
         [viewport cancelDocument];
+#endif
+#if BW_FABFILTER_EDITOR
+        [viewport cancelFabFilterMenu];
 #endif
         UIWindow *window = viewport.window;
         BOOL focused = viewport.isFirstResponder;

@@ -3,7 +3,7 @@
 #include <stdint.h>
 
 enum {
-    BWEditorSurfaceVersion = 2,
+    BWEditorSurfaceVersion = 3,
     BWEditorMaxWidth = 1536,
     BWEditorMaxHeight = 1024,
     BWEditorPointerCapacity = 64,
@@ -35,7 +35,8 @@ typedef struct {
     uint32_t pointsWide, pointsHigh;
     uint64_t sequence;
     double heartbeat;
-    uint8_t visible, closeRequested, cancelRequested;
+    double foregroundHeartbeat;
+    uint8_t visible, closeRequested, cancelRequested, fabFilter;
     uint8_t pointerRead, pointerCount;
     BWEditorInput pointers[BWEditorPointerCapacity];
     uint8_t pixels[BWEditorMaxWidth * BWEditorMaxHeight * 4];

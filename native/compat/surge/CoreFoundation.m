@@ -19,6 +19,18 @@ static NSLock *loaderLock;
 static void *surgeImage;
 static void *ottImage;
 static void *namImage;
+static void *fabFilterImages[22];
+static NSDictionary<NSString *, NSDictionary *> *fabFilterManifest(NSURL *frameworks) {
+    static NSDictionary<NSString *, NSDictionary *> *manifest;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *data = [NSData dataWithContentsOfURL:[frameworks URLByAppendingPathComponent:@"fabfilter-clap.json"]];
+        id contents = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        if ([contents isKindOfClass:NSDictionary.class]) manifest = contents;
+    });
+    return manifest;
+}
+
 #if BW_CHOW_EDITOR
 static void *chowImage;
 #endif
@@ -59,6 +71,18 @@ static NSString *embeddedPluginBinary(CFBundleRef bundle, void ***slot) {
     if ([path isEqualToString:[frameworks URLByAppendingPathComponent:@"NeuralAmpModeler.vst3"].URLByStandardizingPath.path]) {
         if (slot) *slot=&namImage;
         return [frameworks URLByAppendingPathComponent:@"NeuralAmpModeler.bundle"].path;
+    }
+    NSString *name = url.lastPathComponent;
+    if ([name hasPrefix:@"FabFilter "] && [name hasSuffix:@".clap"] &&
+        [path isEqualToString:[frameworks URLByAppendingPathComponent:name].URLByStandardizingPath.path]) {
+        NSDictionary *record = fabFilterManifest(frameworks)[name];
+        NSString *image = record[@"image"];
+        NSNumber *index = record[@"slot"];
+        if (image && [image isEqualToString:image.lastPathComponent] && [image hasSuffix:@".bundle"] &&
+            index && index.unsignedIntegerValue < sizeof(fabFilterImages) / sizeof(fabFilterImages[0])) {
+            if (slot) *slot = &fabFilterImages[index.unsignedIntegerValue];
+            return [frameworks URLByAppendingPathComponent:image].path;
+        }
     }
     return nil;
 }
@@ -127,7 +151,11 @@ void *CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef name) {
     [loaderLock unlock];
     if (!function && systemFunction) function=systemFunction(bundle,name);
 #if BW_SURGE_EDITOR
-    if (function && slot!=&ottImage && slot!=&namImage && CFEqual(name, CFSTR("clap_entry"))) {
+    BOOL surgeEditor = slot == &surgeImage;
+#if BW_CHOW_EDITOR
+    surgeEditor |= slot == &chowImage;
+#endif
+    if (function && surgeEditor && CFEqual(name, CFSTR("clap_entry"))) {
         [loaderLock lock];
 #if BW_CHOW_EDITOR
         if (slot==&chowImage) function=(void *)BWCHOWEditorEntry(function);

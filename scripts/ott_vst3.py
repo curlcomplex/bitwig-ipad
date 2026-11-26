@@ -69,12 +69,12 @@ def stage_ott(source, frameworks, sdk):
             digest(source / OTT_BINARY) != OTT_SHA256):
         raise ValueError('Expected the official universal Xfer OTT 1.3.1 VST3 release')
 
-    return stage_vst3_image(source, frameworks, sdk, OTT_BUNDLE, OTT_BINARY,
+    return stage_desktop_plugin_image(source, frameworks, sdk, OTT_BUNDLE, OTT_BINARY,
                             'OTT.bundle', BRIDGES, DESKTOP_IMPORTS,
                             {'/usr/lib/libSystem.B.dylib': '@rpath/libOTTDyldBridge.dylib'})
 
 
-def stage_vst3_image(source, frameworks, sdk, bundle_name, binary, image_name,
+def stage_desktop_plugin_image(source, frameworks, sdk, bundle_name, binary, image_name,
                      bridges, optional_imports, libraries):
     destination = frameworks / bundle_name
     if destination.exists():
@@ -85,7 +85,8 @@ def stage_vst3_image(source, frameworks, sdk, bundle_name, binary, image_name,
     thin = frameworks.parent / f'{image_name}-arm64'
     image = frameworks / image_name
     invoke('xcrun', 'lipo', source_copy, '-thin', 'arm64', '-output', thin)
-    thin.write_bytes(weaken_imports(bytearray(thin.read_bytes()), optional_imports))
+    if optional_imports:
+        thin.write_bytes(weaken_imports(bytearray(thin.read_bytes()), optional_imports))
     invoke('xcrun', 'vtool', '-set-build-version', 'ios', '17.0', '27.2',
            '-replace', '-output', image, thin)
     thin.unlink()
