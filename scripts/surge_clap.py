@@ -234,7 +234,18 @@ def stage_bundle_loader(lib, cc, native, *, editor_headers=None, chow=False):
     invoke('codesign', '--force', '--sign', '-', core)
 
 
-def stage_surge(source, lib, sdk, cc, native, device, *, editor_headers=None, chow=None):
+def stage_surge_runtime(lib, cc, native, device, *, editor_headers=None, chow=False):
+    editor = editor_headers is not None
+    surge = native / 'surge'
+    stage_desktop_frameworks(lib, cc, native, REPLACED_FRAMEWORKS | ({'Carbon'} if chow else set()), editor=editor)
+    if device:
+        stage_bundle_loader(lib, cc, native, editor_headers=editor_headers, chow=chow)
+    system = lib / 'libSurgeSystemBridge.dylib'
+    invoke(*cc, '-dynamiclib', surge / 'System.c', '-Wl,-reexport-lSystem',
+           '-install_name', f'@rpath/{system.name}', '-o', system)
+    invoke('codesign', '--force', '--sign', '-', system)
+
+def stage_surge(source, lib, sdk, cc, native, device, *, editor_headers=None, chow=None, runtime=True):
     verify_source(source)
     editor = editor_headers is not None
     destination = lib / BUNDLE_NAME
@@ -245,15 +256,9 @@ def stage_surge(source, lib, sdk, cc, native, device, *, editor_headers=None, ch
     if signature.exists():
         shutil.rmtree(signature)
 
-    surge = native / 'surge'
-    stage_desktop_frameworks(lib, cc, native, REPLACED_FRAMEWORKS | ({'Carbon'} if chow else set()), editor=editor)
-    if device:
-        stage_bundle_loader(lib, cc, native, editor_headers=editor_headers, chow=chow)
+    if runtime:
+        stage_surge_runtime(lib, cc, native, device, editor_headers=editor_headers, chow=bool(chow))
     system = lib / 'libSurgeSystemBridge.dylib'
-    invoke(*cc, '-dynamiclib', surge / 'System.c', '-Wl,-reexport-lSystem',
-           '-install_name', f'@rpath/{system.name}', '-o', system)
-    invoke('codesign', '--force', '--sign', '-', system)
-
     binary = destination / BIN
     thin = binary.with_name('.surge-arm64')
     invoke('xcrun', 'lipo', binary, '-thin', 'arm64', '-output', thin)

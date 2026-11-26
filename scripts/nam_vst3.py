@@ -40,13 +40,18 @@ def stage_nam(source, frameworks, sdk):
                             {'/usr/lib/libSystem.B.dylib': '@rpath/libNAMSystemBridge.dylib'})
 
 
-def stage_nam_shader(frameworks, cc, native, sdk_name):
+def stage_nam_shader(frameworks, cc, native, sdk_name, *, runtime=True):
     shader = native / 'nam/nanovg_mtl_shaders.metal'
     object_file = frameworks.parent / 'nam-nanovg.air'
     library = frameworks / NAM_BUNDLE / 'Contents/Resources/NeuralAmpModeler-iOS.metallib'
     target = 'air64-apple-ios17.0' + ('-simulator' if sdk_name == 'iphonesimulator' else '')
     invoke('xcrun', '--sdk', sdk_name, 'metal', '-target', target, '-c', shader, '-o', object_file)
     invoke('xcrun', '--sdk', sdk_name, 'metallib', object_file, '-o', library)
+    if runtime:
+        stage_nam_runtime(frameworks, cc, native)
+
+
+def stage_nam_runtime(frameworks, cc, native):
     bridge = frameworks / 'libNAMSystemBridge.dylib'
     invoke(*cc, '-fobjc-arc', '-dynamiclib', native / 'nam/ShaderData.m',
            '-framework', 'Foundation', '-Wl,-reexport-lSystem',

@@ -1,7 +1,8 @@
-#import "../LocalConfiguration.h"
+#import "../PluginPackage.h"
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <mach-o/loader.h>
 #include <unistd.h>
 
@@ -47,9 +48,54 @@ static void resolveLoader(void) {
         systemFunction=dlsym(system,"CFBundleGetFunctionPointerForName");
     });
 }
+static NSMutableDictionary<NSString *, NSValue *> *preparedSlots;
+static NSMutableDictionary<NSString *, NSString *> *preparedPaths;
+static CFBundleRef preparedOTTBundle, preparedNAMBundle;
+static bool (*preparedOTTEntry)(CFBundleRef);
+static bool (*preparedNAMEntry)(CFBundleRef);
+
+static bool enterPreparedOTT(CFBundleRef original) { return preparedOTTEntry(preparedOTTBundle); }
+static bool enterPreparedNAM(CFBundleRef original) { return preparedNAMEntry(preparedNAMBundle); }
+
+static NSString *preparedPluginBinary(NSURL *bundle,void ***slot) {
+    NSString *name=bundle.lastPathComponent;
+    NSURL *generation=BWPreparedPluginDirectory(bundle);
+    if (!generation) return nil;
+    NSString *image=BWPreparedPluginImageName(name);
+    [loaderLock lock];
+    if (!preparedPaths) { preparedPaths=[NSMutableDictionary new]; preparedSlots=[NSMutableDictionary new]; }
+    NSString *path=preparedPaths[name];
+    if (!path) {
+        NSURL *imageURL=[generation URLByAppendingPathComponent:image];
+        struct stat state={};
+        NSURL *manifest=[generation URLByAppendingPathComponent:@"Package.plist"];
+        int lease=open(manifest.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        BOOL leased=lease>=0 && flock(lease,LOCK_SH|LOCK_NB)==0;
+        if (leased && lstat(imageURL.fileSystemRepresentation,&state)==0 && S_ISREG(state.st_mode)) {
+            // Keep the shared lease for the lifetime of the factory and its resources.
+            path=imageURL.path;
+            preparedPaths[name]=path;
+            if ([name isEqualToString:@"Surge XT.clap"]) preparedSlots[name]=[NSValue valueWithPointer:&surgeImage];
+#if BW_CHOW_EDITOR
+            else if ([name isEqualToString:@"CHOWTapeModel.clap"]) preparedSlots[name]=[NSValue valueWithPointer:&chowImage];
+#endif
+            else preparedSlots[name]=[NSValue valueWithPointer:calloc(1,sizeof(void *))];
+        } else if (lease>=0) close(lease);
+    }
+    if (slot) *slot=preparedSlots[name].pointerValue;
+    [loaderLock unlock];
+    return path;
+}
+
+static BOOL isPreparedImage(NSString *path) {
+    NSString *root=BWPreparedPluginRoot().URLByResolvingSymlinksInPath.path;
+    return root && [path hasPrefix:[root stringByAppendingString:@"/"]];
+}
+
 static NSString *embeddedPluginBinary(CFBundleRef bundle, void ***slot) {
     if (!bundle) return nil;
     NSURL *url=CFBridgingRelease(CFBundleCopyBundleURL(bundle));
+    if (BWIndependentPluginsEnabled()) return preparedPluginBinary(url,slot);
     NSURL *app=NSBundle.mainBundle.bundleURL;
     if ([app.pathExtension isEqualToString:@"appex"])
         app=app.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
@@ -139,7 +185,7 @@ Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *err
     // Use CFBundle normally where supported. Hold the dlopen fallback for the
     // lifetime of this process so native factory pointers remain valid.
     CFErrorRef originalError=NULL;
-    if (systemLoad&&systemLoad(bundle,&originalError)) {
+    if (!isPreparedImage(path) && systemLoad&&systemLoad(bundle,&originalError)) {
         if (originalError) CFRelease(originalError);
         return true;
     }
@@ -162,11 +208,27 @@ Boolean CFBundleLoadExecutableAndReturnError(CFBundleRef bundle, CFErrorRef *err
 void *CFBundleGetFunctionPointerForName(CFBundleRef bundle, CFStringRef name) {
     resolveLoader();
     void **slot=NULL;
-    if (!embeddedPluginBinary(bundle,&slot)) return systemFunction?systemFunction(bundle,name):NULL;
+    NSString *path=embeddedPluginBinary(bundle,&slot);
+    if (!path) return systemFunction?systemFunction(bundle,name):NULL;
     [loaderLock lock];
     void *function=*slot?dlsym(*slot,[(__bridge NSString *)name UTF8String]):NULL;
     [loaderLock unlock];
-    if (!function && systemFunction) function=systemFunction(bundle,name);
+    if (!function && !isPreparedImage(path) && systemFunction) function=systemFunction(bundle,name);
+    if (function && isPreparedImage(path) && CFEqual(name,CFSTR("bundleEntry"))) {
+        NSString *filename=path.lastPathComponent;
+        NSURL *root=[[NSURL fileURLWithPath:path] URLByDeletingLastPathComponent];
+        [loaderLock lock];
+        if ([filename isEqualToString:@"OTT.bundle"]) {
+            if (!preparedOTTBundle) preparedOTTBundle=CFBundleCreate(NULL,(__bridge CFURLRef)[root URLByAppendingPathComponent:@"OTT.vst3"]);
+            preparedOTTEntry=function;
+            function=preparedOTTBundle ? enterPreparedOTT : NULL;
+        } else if ([filename isEqualToString:@"NeuralAmpModeler.bundle"]) {
+            if (!preparedNAMBundle) preparedNAMBundle=CFBundleCreate(NULL,(__bridge CFURLRef)[root URLByAppendingPathComponent:@"NeuralAmpModeler.vst3"]);
+            preparedNAMEntry=function;
+            function=preparedNAMBundle ? enterPreparedNAM : NULL;
+        }
+        [loaderLock unlock];
+    }
 #if BW_SURGE_EDITOR
     BOOL surgeEditor = slot == &surgeImage;
 #if BW_CHOW_EDITOR

@@ -37,6 +37,7 @@ __pycache__/
 !/scripts/ott_vst3.py
 !/scripts/nam_vst3.py
 !/scripts/fabfilter_clap.py
+!/scripts/prepare-plugins.py
 !/docs/
 /docs/*
 !/docs/compatibility.md

@@ -80,7 +80,7 @@ def validate_fabfilter_sources(sources):
     return dict(sorted(selected.items()))
 
 
-def stage_fabfilter(selected, frameworks, sdk, cc, native):
+def stage_fabfilter_runtime(frameworks, cc, native):
     stage_desktop_frameworks(frameworks, cc, native, {'AppKit', 'ApplicationServices', 'CoreServices'}, editor=True)
     source = native / 'fabfilter'
     for framework, base, suffix in [('AppKit', 'SurgeAppKit', 'm'), ('Carbon', 'Carbon', 'm'),
@@ -97,6 +97,11 @@ def stage_fabfilter(selected, frameworks, sdk, cc, native):
     invoke(*cc, '-dynamiclib', source / 'Preferences.c', '-Wl,-reexport_framework,CoreFoundation',
            '-install_name', f'@rpath/{preferences.name}', '-o', preferences)
     invoke('codesign', '--force', '--sign', '-', preferences)
+
+
+def stage_fabfilter(selected, frameworks, sdk, cc, native, *, runtime=True):
+    if runtime:
+        stage_fabfilter_runtime(frameworks, cc, native)
     products = {}
     for slot, (name, original) in enumerate(selected.items()):
         binary = Path('Contents/MacOS') / original.stem

@@ -1,14 +1,82 @@
-#import "../native/compat/LocalConfiguration.h"
+#import "../native/compat/PluginPackage.h"
 #import <UIKit/UIKit.h>
 #import "../native/compat/Trace.h"
 #include <dlfcn.h>
 #include <jni.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <sys/file.h>
+#include <fcntl.h>
+#include <unistd.h>
 #import <objc/message.h>
 #import <TargetConditionals.h>
 #ifdef EMBEDDED_ENGINE
 extern BOOL BWInstallEngineProcessAdapter(JNIEnv *env);
+
+static void BWCollectRetiredPlugins(NSSet *active) {
+    NSFileManager *files=NSFileManager.defaultManager;
+    for (NSURL *folder in [files contentsOfDirectoryAtURL:BWPreparedPluginRoot() includingPropertiesForKeys:nil options:0 error:nil]) {
+        if ([active containsObject:folder.lastPathComponent] || ![[NSUUID alloc] initWithUUIDString:folder.lastPathComponent]) continue;
+        struct stat state={};
+        if (lstat(folder.fileSystemRepresentation,&state)!=0 || !S_ISDIR(state.st_mode)) continue;
+        NSURL *manifest=[folder URLByAppendingPathComponent:@"Package.plist"];
+        int lease=open(manifest.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+        if (lease<0) continue;
+        if (flock(lease,LOCK_EX|LOCK_NB)==0) {
+            NSDictionary *info=[NSDictionary dictionaryWithContentsOfURL:manifest];
+            if ([info[@"bridgeABI"] isEqual:@1] && [info[@"bundle"] isKindOfClass:NSString.class] &&
+                [info[@"image"] isEqual:BWPreparedPluginImageName(info[@"bundle"])])
+                [files removeItemAtURL:folder error:nil];
+        }
+        close(lease);
+    }
+}
+
+static NSDictionary<NSString *, NSURL *> *BWIndependentPluginLocations(void) {
+    NSURL *root=BWManagedPluginRoot();
+    if (!root) return nil;
+    NSFileManager *files=NSFileManager.defaultManager;
+    struct stat state={};
+    if (lstat(root.fileSystemRepresentation,&state)==0) {
+        if (!S_ISDIR(state.st_mode) ||
+            (![files fileExistsAtPath:[root URLByAppendingPathComponent:@".managed-discovery-v1"].path] &&
+             ![files fileExistsAtPath:[root URLByAppendingPathComponent:@".independent-discovery-v1"].path])) return nil;
+    } else if (errno!=ENOENT) return nil;
+    NSURL *staging=[root.URLByDeletingLastPathComponent URLByAppendingPathComponent:
+        [@"." stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
+    if (![files createDirectoryAtURL:staging withIntermediateDirectories:NO attributes:nil error:nil]) return nil;
+    @try {
+        NSMutableDictionary *locations=[NSMutableDictionary new];
+        for (NSString *format in @[@"CLAP",@"VST3"]) {
+            NSURL *folder=[staging URLByAppendingPathComponent:format isDirectory:YES];
+            if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO attributes:nil error:nil]) return nil;
+            locations[format]=[root URLByAppendingPathComponent:format isDirectory:YES];
+        }
+        NSDictionary *registry=BWReadPreparedPluginRegistry();
+        NSMutableSet *active=[NSMutableSet new];
+        for (NSString *name in registry) {
+            NSString *idString=registry[name];
+            if (![name isKindOfClass:NSString.class] || !BWPreparedPluginImageName(name) ||
+                ![idString isKindOfClass:NSString.class] || ![[NSUUID alloc] initWithUUIDString:idString]) return nil;
+            NSURL *generation=[BWPreparedPluginRoot() URLByAppendingPathComponent:idString isDirectory:YES];
+            NSURL *contents=[[generation URLByAppendingPathComponent:name] URLByAppendingPathComponent:@"Contents"];
+            if (lstat(contents.fileSystemRepresentation,&state)!=0 || !S_ISDIR(state.st_mode)) return nil;
+            NSURL *folder=[[staging URLByAppendingPathComponent:name.pathExtension.uppercaseString] URLByAppendingPathComponent:name];
+            if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO attributes:nil error:nil] ||
+                ![files createSymbolicLinkAtURL:[folder URLByAppendingPathComponent:@"Contents"] withDestinationURL:contents error:nil])
+                return nil;
+            [active addObject:idString];
+        }
+        NSURL *marker=[staging URLByAppendingPathComponent:@".managed-discovery-v1"];
+        if (![[NSData data] writeToURL:marker options:0 error:nil]) return nil;
+        if (renamex_np(staging.fileSystemRepresentation,root.fileSystemRepresentation,RENAME_EXCL)!=0 &&
+            (errno!=EEXIST || renamex_np(staging.fileSystemRepresentation,root.fileSystemRepresentation,RENAME_SWAP)!=0)) return nil;
+        BWCollectRetiredPlugins(active);
+        return locations;
+    } @finally {
+        [files removeItemAtURL:staging error:nil];
+    }
+}
 
 static NSDictionary<NSString *, NSURL *> *BWRefreshManagedPlugins(NSURL *frameworks) {
     NSURL *root = BWManagedPluginRoot();
@@ -215,7 +283,7 @@ static void runJava(void) {
 #endif
 #ifdef EMBEDDED_ENGINE
     NSURL *frameworks = [NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Frameworks" isDirectory:YES];
-    NSDictionary<NSString *, NSURL *> *discovery = BWRefreshManagedPlugins(frameworks);
+    NSDictionary<NSString *, NSURL *> *discovery = BWIndependentPluginsEnabled() ? BWIndependentPluginLocations() : BWRefreshManagedPlugins(frameworks);
     for (NSString *format in discovery)
         setenv([[format stringByAppendingString:@"_PATH"] UTF8String], discovery[format].fileSystemRepresentation, 1);
 #endif

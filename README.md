@@ -69,11 +69,28 @@ python3 scripts/build-native-host.py --device --embedded-tunnel --embedded-engin
 
 Use the same `BITWIG_APP` and identity configuration for all three commands. The build does not install the app on an iPad. Provision trust and pairing for the device locally. The existing helper reads `Documents/pairing.plist` from the installed app. Keep pairing records, signing materials, logs, generated files, and proprietary assets outside tracked source.
 
+For separately installed plug-ins, add the [independent plug-in runtime options](#install-plug-ins-separately-on-ipad) to the host build.
+
 ## Projects and Master Recording
 
 File → Save stores new projects in `BitwigUser/Projects` in the app's shared container. Reopen them from Recent Projects on the Bitwig Dashboard. Use the master meter's record button to capture the master output, and the adjacent folder button to open the project's `master-recordings` folder and preview the recording.
 
 ## Experimental original plug-in editors
+
+### Install plug-ins separately on iPad
+
+Build the host once with `--independent-plugins`, `--device`, `--embedded-engine`, and `--surge-editor-clap-include /path/to/clap/include`. This build ships the plug-in runtime and scanner without vendor plug-ins. In Bitwig Settings → Plug-ins, select **with Bitwig**.
+
+On the Mac, prepare your locally installed supported plug-ins with the same Apple Development signing identity used for the host:
+
+```sh
+python3 scripts/prepare-plugins.py --library /Library/Audio/Plug-Ins \
+  --output "$PWD/Prepared Plug-ins" --sign "Apple Development: Your Name"
+```
+
+You can also pass individual desktop bundle paths to the Mac preparer. The iPad importer accepts its prepared output folders. Copy the prepared folders to a location visible in iPad Files. Tap **Manage Plug-ins**, choose **Import Prepared Folder**, select one prepared folder or the whole prepared library, then quit and reopen Bitwig. Use the same menu to remove an individual plug-in, then quit and reopen Bitwig to refresh discovery. Preparing your existing library keeps the original plug-in identities for saved projects. Keep the vendor licenses required by those plug-ins.
+
+### Plug-ins bundled in development builds
 
 The following opt-ins use matching locally installed desktop plug-ins. In Bitwig Settings → Plug-ins, select **with Bitwig**.
 
