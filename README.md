@@ -77,6 +77,8 @@ File → Save stores new projects in `BitwigUser/Projects` in the app's shared c
 
 The following opt-ins use matching locally installed desktop plug-ins. In Bitwig Settings → Plug-ins, select **with Bitwig**.
 
+Editors open in floating panels, with the Arrangement usable around them. Drag the toolbar to move, drag the lower-right handle to resize the display, or use the toolbar buttons to go fullscreen, restore the previous floating size, or close.
+
 ### Surge XT and CHOW Tape Model CLAP
 
 Pass `--surge-clap "/path/to/Surge XT.clap"` to the iPad build with `--embedded-engine` to include a private copy of the supported Surge XT 1.3.4 desktop release. The build checks the original image, adapts its ARM64 slice, and signs it locally. This build uses Bitwig's device parameters by default.
