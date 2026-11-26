@@ -1,4 +1,4 @@
-#import <Foundation/Foundation.h>
+#import "../PluginPackage.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <dlfcn.h>
 #include <string.h>
@@ -28,14 +28,26 @@ dispatch_data_t dispatch_data_create(const void *bytes, size_t length, dispatch_
         unsigned char hash[CC_SHA256_DIGEST_LENGTH];
         CC_SHA256(bytes, (CC_LONG)length, hash);
         if (!memcmp(hash, desktopShaderHash, sizeof(hash))) {
+            void *returnAddress = __builtin_return_address(0);
             static dispatch_once_t load;
             dispatch_once(&load, ^{
                 NSURL *app = NSBundle.mainBundle.bundleURL;
                 if ([app.pathExtension isEqualToString:@"appex"])
                     app = app.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
-                NSURL *url = [app URLByAppendingPathComponent:
-                    @"Frameworks/NeuralAmpModeler.vst3/Contents/Resources/NeuralAmpModeler-iOS.metallib"];
-                platformShader = [NSData dataWithContentsOfURL:url];
+                NSURL *url;
+                if (BWIndependentPluginsEnabled()) {
+                    Dl_info caller={};
+                    if (dladdr(returnAddress, &caller) && caller.dli_fname) {
+                        NSURL *image=[NSURL fileURLWithFileSystemRepresentation:caller.dli_fname isDirectory:NO relativeToURL:nil];
+                        if ([image.lastPathComponent isEqualToString:@"NeuralAmpModeler.bundle"])
+                            url=[image.URLByDeletingLastPathComponent URLByAppendingPathComponent:
+                                @"NeuralAmpModeler.vst3/Contents/Resources/NeuralAmpModeler-iOS.metallib"];
+                    }
+                } else {
+                    url=[app URLByAppendingPathComponent:
+                        @"Frameworks/NeuralAmpModeler.vst3/Contents/Resources/NeuralAmpModeler-iOS.metallib"];
+                }
+                if (url) platformShader = [NSData dataWithContentsOfURL:url];
             });
             if (platformShader.length)
                 return systemCreateData(platformShader.bytes, platformShader.length, queue, destructor);

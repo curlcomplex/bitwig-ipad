@@ -10,10 +10,10 @@ import shutil
 import zipfile
 from pathlib import Path
 from bitwig_source import BitwigSource, ENGINE, JNI, ROOT, java_probe_info, sha256
-from surge_clap import BUNDLE_NAME, CHOW_BUNDLE, HELPER_PATH, stage_bundle_loader, stage_desktop_frameworks, stage_surge, stage_metadata_helper
+from surge_clap import BUNDLE_NAME, CHOW_BUNDLE, HELPER_PATH, stage_bundle_loader, stage_desktop_frameworks, stage_surge, stage_metadata_helper, stage_surge_runtime
 from ott_vst3 import OTT_BUNDLE, stage_ott, stage_ott_bridges
-from nam_vst3 import NAM_BUNDLE, stage_nam, stage_nam_shader
-from fabfilter_clap import stage_fabfilter, validate_fabfilter_sources
+from nam_vst3 import NAM_BUNDLE, stage_nam, stage_nam_shader, stage_nam_runtime
+from fabfilter_clap import RELEASES, stage_fabfilter, stage_fabfilter_runtime, validate_fabfilter_sources
 from local_config import build_identity, jni_include_paths, selected_simulator, simulator_argument
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--run',action='store_true',help='Install and launch the built Simulator host')
@@ -21,6 +21,7 @@ simulator_argument(parser)
 parser.add_argument('--device',action='store_true',help='Build/sign the native iPad host with its embedded JIT helper')
 parser.add_argument('--embedded-tunnel',action='store_true',help='Include the local developer tunnel in the iPad app; configuration requires its setup button')
 parser.add_argument('--embedded-engine',action='store_true',help='Include the adapted audio engine in its own native extension process')
+parser.add_argument('--independent-plugins', action='store_true', help='Include plug-in runtime support and import prepared folders on iPad')
 parser.add_argument('--surge-clap', type=Path, help='Include the supported local Surge XT 1.3.4 desktop CLAP')
 parser.add_argument('--surge-editor-clap-include', type=Path, help='Enable the experimental Surge editor using the official CLAP SDK include directory')
 parser.add_argument('--chow-clap', type=Path, help='Also include the supported CHOW Tape Model 2.11.0 desktop CLAP')
@@ -35,15 +36,20 @@ try:
     fabfilter = validate_fabfilter_sources(args.fabfilter_clap)
 except (OSError, ValueError) as error:
     parser.error(str(error))
-plugin_metadata = args.surge_clap or args.ott_vst3 or args.nam_vst3 or fabfilter
+if args.independent_plugins:
+    if not (args.device and args.embedded_engine and args.surge_editor_clap_include):
+        parser.error('--independent-plugins requires --device, --embedded-engine, and --surge-editor-clap-include')
+    if any((args.surge_clap, args.chow_clap, args.ott_vst3, args.nam_vst3, fabfilter)):
+        parser.error('--independent-plugins uses prepared folders instead of bundling plug-ins')
+plugin_metadata = args.independent_plugins or args.surge_clap or args.ott_vst3 or args.nam_vst3 or fabfilter
 if args.nam_vst3 and not (args.device and args.embedded_engine):
     parser.error('--nam-vst3 requires --device and --embedded-engine')
 if args.ott_vst3 and not (args.device and args.embedded_engine):
     parser.error('--ott-vst3 requires --device and --embedded-engine')
 if args.surge_clap and not args.embedded_engine: parser.error('--surge-clap requires --embedded-engine')
 if args.chow_clap and not args.surge_editor_clap_include: parser.error('--chow-clap requires --surge-editor-clap-include')
-if args.surge_editor_clap_include and (not args.surge_clap or not (args.surge_editor_clap_include/'clap/clap.h').is_file()):
-    parser.error('--surge-editor-clap-include needs --surge-clap and the official CLAP SDK include directory')
+if args.surge_editor_clap_include and (not (args.surge_clap or args.independent_plugins) or not (args.surge_editor_clap_include/'clap/clap.h').is_file()):
+    parser.error('--surge-editor-clap-include needs plug-in support (--surge-clap or --independent-plugins) and the official CLAP SDK include directory')
 if args.embedded_tunnel and not args.device: parser.error('--embedded-tunnel requires --device')
 if args.embedded_engine and not args.device: parser.error('--embedded-engine requires --device')
 if args.run and args.device: parser.error('--run only applies to the Simulator host')
@@ -54,6 +60,7 @@ SOURCE = bitwig.contents
 build_name = 'native-host-tunnel' if args.embedded_tunnel else 'native-host-device' if args.device else 'native-host'
 if args.embedded_tunnel and not args.embedded_engine: build_name += '-no-engine'
 if args.embedded_engine and not args.embedded_tunnel: build_name += '-engine'
+if args.independent_plugins: build_name += '-independent-plugins'
 if args.surge_clap: build_name += '-surge'
 if args.surge_editor_clap_include: build_name += '-editor'
 if args.chow_clap: build_name += '-chow'
@@ -93,13 +100,16 @@ compat=LIB/'libBitwigUIKit.dylib'
 frameworks=['UIKit','Foundation','CoreFoundation','CoreGraphics','QuartzCore','CoreServices','CoreVideo','GameController','Metal','UniformTypeIdentifiers']
 run(*CC,'-fno-objc-arc','-c',ROOT/'native/compat/Metal.m','-o',BUILD/'Metal.o')
 compat_sources = [ROOT/'native/compat/AppKit.m', ROOT/'native/compat/DesktopServices.m']
-if args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3 or fabfilter: compat_sources.append(ROOT/'native/compat/surge/EditorSurface.m')
-compat_defines = ['-DBW_VSTGUI_EDITOR=1'] if args.ott_vst3 else []
+if args.independent_plugins or args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3 or fabfilter: compat_sources.append(ROOT/'native/compat/surge/EditorSurface.m')
+compat_defines = ['-DBW_VSTGUI_EDITOR=1'] if args.ott_vst3 or args.independent_plugins else []
 if args.surge_editor_clap_include: compat_defines.append('-DBW_JUCE_EDITOR=1')
-if fabfilter:
+if args.independent_plugins:
+    compat_sources.append(ROOT/'native/compat/PluginPackage.m')
+    compat_defines.append('-DBW_INDEPENDENT_PLUGIN_UI=1')
+if fabfilter or args.independent_plugins:
     compat_sources.extend(ROOT/'native/compat/fabfilter'/name for name in ('View.m', 'Menu.m'))
     compat_defines.append('-DBW_FABFILTER_EDITOR=1')
-if args.nam_vst3:
+if args.nam_vst3 or args.independent_plugins:
     compat_sources += [ROOT/'native/compat/nam'/name for name in ('Layer.m', 'Capture.m')]
     compat_defines.append('-DBW_IPLUG_EDITOR=1')
 
@@ -184,6 +194,13 @@ if fabfilter:
         stage_fabfilter(fabfilter, LIB, SDK, CC, native)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         parser.error(f'Could not stage FabFilter CLAP: {error}')
+if args.independent_plugins:
+    native = ROOT/'native/compat'
+    stage_surge_runtime(LIB, CC, native, True, editor_headers=args.surge_editor_clap_include, chow=True)
+    stage_desktop_frameworks(LIB, CC, native, {'AppKit', 'CoreGraphics', 'CoreServices', 'Foundation'}, editor=True)
+    stage_ott_bridges(LIB, CC, native)
+    stage_nam_runtime(LIB, CC, native)
+    stage_fabfilter_runtime(LIB, CC, native)
 if plugin_metadata:
     try:
         stage_metadata_helper(SOURCE, LIB, BUILD)
@@ -238,6 +255,15 @@ info.update(identity.group_info())
 if args.embedded_engine: info['UIBackgroundModes']=['audio']
 info.update(UIStatusBarHidden=True,UIViewControllerBasedStatusBarAppearance=False,UIRequiresFullScreen=True,CFBundleDisplayName='Bitwig',CFBundleIdentifier=identity.bundle('nativehost'),CFBundleExecutable='BitwigNativeHost',CFBundleName='Bitwig Native Host')
 info.update(UIFileSharingEnabled=True,LSSupportsOpeningDocumentsInPlace=True)
+if args.independent_plugins:
+    info['BWIndependentPlugins'] = True
+    info['BWPreparedPluginRecipes'] = {
+        BUNDLE_NAME: ['org.surge-synth-team.surge-xt', '1.3.4'],
+        CHOW_BUNDLE: ['org.chowdsp.CHOWTapeModel', '2.11.0'],
+        OTT_BUNDLE: ['com.xfer.OTT.VST3', '1.3.1'],
+        NAM_BUNDLE: ['com.StevenAtkinson.vst3.NeuralAmpModeler', '0.7.13'],
+        **{name: [identifier, version] for name, (version, identifier, _) in RELEASES.items()},
+    }
 if args.device:info.update(NSLocalNetworkUsageDescription='The embedded Java JIT helper connects to this iPad through its local developer tunnel.')
 # Extract the icon from the user's licensed local installation, never distribute it.
 icons=BUILD/'Assets.xcassets/AppIcon.appiconset';icons.mkdir(parents=True,exist_ok=True)
@@ -331,7 +357,7 @@ PYSIGN'''
                 'INFOPLIST_FILE':str(BUILD/'Plug-in-Metadata-Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Engine.entitlements'),
                 'CLANG_ENABLE_OBJC_ARC':'YES','APPLICATION_EXTENSION_API_ONLY':'YES',
                 'LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../../Frameworks'}}}
-    if args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3 or fabfilter:
+    if args.independent_plugins or args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3 or fabfilter:
         host['settings']['base']['GCC_PREPROCESSOR_DEFINITIONS'].append('BW_SURGE_REMOTE=1')
     if args.embedded_tunnel:
         host=project['targets']['BitwigNativeHost']
