@@ -1,61 +1,102 @@
-# Bitwig on iPad — experimental native host
+# Bitwig on iPad
 
-An independent prototype adapting locally installed ARM64 Bitwig Studio binaries to iPadOS with a UIKit compatibility layer, an iOS Java runtime, and an embedded audio-engine process. It is not a source recompilation of Bitwig and is not affiliated with or endorsed by Bitwig GmbH.
+An experimental, independent UIKit host for a locally supplied ARM64 Bitwig Studio installation. It runs adapted copies of the original frontend and audio engine with an iOS Java runtime. It is unaffiliated with Bitwig GmbH.
 
-## Current state
-
-Bitwig Studio 6.1.4 has run on a physical iPad mini A17 Pro: the original interface, Poly Synth, clip playback, internal device dragging and speaker output have been exercised. The integrated JIT helper uses a local developer tunnel and trusted device pairing; it remains debugger-assisted internally. No separate debugger app is needed in the tested session. Standalone launch after reboot with the Mac disconnected is not yet qualified.
-
-The main resizable window follows the current iPad scene bounds. The app hides the status bar and extracts its icon from the user's own Bitwig installation at build time. Menus and dialogs retain their own window geometry.
-
-6.1.7 multitouch work has begun. A local comparison of the official 6.1.7 download against 6.1.4 found seven added native imports and 35 added touch-related strings, including `BWDirectTouchRecognizer`, `handleTouchPressedEvent`, `handleTouchUpdateEvent` and `handleTouchReleasedEvent`. The recognizer subclasses `NSGestureRecognizer` and consumes AppKit touch events. The current UIKit bridge still maps one finger to mouse input; simultaneous multitouch is not implemented yet.
-
-The immediate integration work is to provide the recognizer/touch-event compatibility layer, preserve each finger's identity and phase, and forward UIKit touches into the original Bitwig recognizer. The audio-engine binary also changed: its version-specific LLVM memory-manager addresses must be revalidated before replacing the installed 6.1.4 build. Do not mix a 6.1.7 frontend with the cached 6.1.4 engine.
-
-A repeatable read-only comparison is available:
+**Current implementation:** [`epic/6.1.7-multitouch`](https://github.com/curlcomplex/bitwig-ipad/tree/epic/6.1.7-multitouch). The default branch is an older implementation. Check out the current branch before running either build below.
 
 ```sh
-python3 scripts/inspect-bitwig-upgrade.py /path/to/6.1.4.app /path/to/6.1.7.app --output evidence/upgrade.json
+git fetch origin
+git switch epic/6.1.7-multitouch
 ```
 
-After building the device host and engine probe, compare both local ARM64 app bundles against that build's compiled bridges and the iPhoneOS SDK:
+The repository contains development source. The build reads Bitwig and other binary dependencies from local installations, leaves the originals intact, and writes generated apps and diagnostics under ignored directories. The project’s original compatibility code is under MIT. Third-party components and materials retain their applicable terms. [License scope](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/LICENSE) · [Third-party notices](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md) · [Bitwig terms](https://www.bitwig.com/terms-conditions/)
 
-```sh
-python3 scripts/inventory-native-compat.py /path/to/6.1.4.app /path/to/6.1.7.app \
-  --frameworks build/native-host-tunnel/DerivedData/Build/Products/Debug-iphoneos/BitwigNativeHost.app/Frameworks \
-  --jni-mappings evidence/native-host-device-library-mappings.json \
-  --engine-mappings evidence/native-engine-device-adaptation.json \
-  --output evidence/native-compat.json
+## How it works
+
+```mermaid
+flowchart LR
+    UIKit["UIKit host and input"] --> Bridge["AppKit compatibility bridge"]
+    Java["iOS Java runtime and original Bitwig frontend"] <--> Bridge
+    Java <-->|App Group files and IPC| Engine["Original ARM64 engine in its own extension"]
+    Engine --> Audio["Shared PCM ring and host RemoteIO output"]
 ```
 
-Add `--simulator <booted-device>` for system Objective-C method declarations, inheritance and type encodings from an ARM64 iOS Simulator. The report checks mapped dependencies and their re-exports, separates strong imports from weak-definition coalescing entries, and records when a provider cannot be inspected. Objective-C selector references list possible owners from inspected metadata. Explicitly attributed direct calls carry the caller, dispatch kind and inheritance chain. Other calls remain ambiguous. An export or matching selector name alone cannot establish ABI or behavior. Dynamic dispatch, forwarding and selector names built at runtime can escape this inventory. Keep the generated report local.
+The device host uses an embedded JIT helper with a trusted local developer pairing. The local tunnel is based on **LocalDevVPN by Stossy11 and the SideStore Team**. [Tunnel license and attribution](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md)
 
-The 6.1.4 window crash came from `BWWindow` calling the missing inherited frame constraint during a move. The same call also appears in its fullscreen-exit handler, and both sites are present in 6.1.7. The bridge constrains vertical placement to the iPad scene and preserves horizontal placement and the host's adaptive fullscreen policy. The simulator geometry test exercises that inherited method against the compiled bridge.
+## Verified on Bitwig Studio 6.1.7
 
-The audit also found two missing superclass live-resize callbacks on `BWView`. The host resizes its UIKit scene through layout callbacks. The original desktop live-resize sequence has no established caller in the iPad host. The unresolved `CGFontCreateWithPlatformFont` import is in Cairo's legacy ATS font path. Its use in the supported host has not been observed. The 6.1.7 recognizer and key-state dependencies are part of the ongoing multitouch work.
+| Area | Evidence |
+| --- | --- |
+| Touch and windows | The original onscreen keyboard was tested hands-on with multiple fingers on a physical iPad mini A17 Pro. The Simulator exercised independent finger release, scene-switch cancellation, and an Arranger radial-menu gesture. The main workspace fills the scene, and auxiliary dialogs preserve their own size. |
+| Keyboard and mouse | Tested physical secondary click and Cmd+D clip duplication. Caps Lock toggles the original computer MIDI keyboard. A physical A key played and released a note when enabled and stayed quiet when disabled. |
+| Audio and MIDI | Built-in microphone recording with simultaneous speaker output was verified. Audio through a Zoom U-44 was tested hands-on, and its MIDI ports appeared. MIDI data transfer remains untested. A saved clip also played over AirPods in hands-free mode, and a live switch to the speaker and back reconnected the open project. |
+| Projects and recording | A saved, activated project reopened with its instrument and edited MIDI notes intact. The original Master Recording produced a WAV that remained available after reopening and played in Bitwig’s Preview Player. |
+| Original plug-in editors | Scripted input on a physical iPad exercised the current opt-in builds of Surge XT, CHOW Tape Model, Xfer OTT, and Neural Amp Modeler. Parameter edits, Close Plug-in, project save and reopen, and audio playback were checked. NAM also restored a model and impulse response imported through its editor. |
 
-The engine report records a null dereference in the original engine's render callback about 25 ms after the frontend aborted. Connection teardown is a hypothesis. Reproducing the callback fault with engine lifecycle evidence is required to establish its cause.
+The device launch is debugger-assisted and uses a trusted local developer pairing. Standalone launch after a reboot remains unverified. Project saving and exporting require the applicable Bitwig activation. [Compatibility details and test commands](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/docs/compatibility.md)
 
-The earlier fullscreen and icon update was installed and checked with a live 1133 × 744-point window at origin zero and an edge-to-edge screenshot with no status icons. Both captures from the status-bar rotation check remained in landscape. Physical portrait behavior and the new frame-constraint fix still need their own device evidence.
+## Build a Simulator host
 
-## Source and local prerequisites
-
-This repository contains the compatibility code, host, development tools and targeted tests. It intentionally excludes Bitwig binaries, JARs, presets, icons, Java runtime binaries, signing material, pairing records, screenshots and device logs. Obtain Bitwig from its publisher and comply with its licence. Demo Mode restrictions are unchanged.
-
-The integrated tunnel uses code based on LocalDevVPN by Stossy11 and the SideStore Team; see THIRD_PARTY.md and its retained licence.
-
-The current development setup uses macOS, Xcode with an iOS SDK, Python 3, XcodeGen, a Java development kit for JNI headers, Apple development signing, and a trusted iPad with Developer Mode enabled. The scripts currently assume Homebrew paths and project-specific signing/bundle identifiers; adjust those for your account.
-
-Local dependencies under `vendor/` are described in THIRD_PARTY.md. This is a development snapshot, not a one-command installer: the iOS Java runtime, embedded helper dependencies, device pairing and signing must be prepared separately. Never commit a pairing file.
-
-The existing build sequence prepares the Java probe bundle metadata, runs `scripts/audit-native-port.py`, builds the audio engine using `scripts/build-native-engine-probe.py --device`, then builds the host:
+Use an Apple-silicon Mac, Xcode with an ARM64 iPad Simulator runtime, Python 3.10+, and a macOS JDK for JNI headers. The current build was checked with Xcode 27.2. Supply a local ARM64 Bitwig Studio 6.1.4 or 6.1.7 app and a compatible iOS Java 25 runtime in `vendor/java25-ios`. The runtime directory needs `lib/`, `conf/`, and `release`. Set `BITWIG_JDK_HOME` to override `JAVA_HOME` and macOS JDK discovery. [Runtime provenance](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md)
 
 ```sh
+export BITWIG_APP="/path/to/Bitwig Studio 6.1.7.app"
+python3 scripts/audit-native-port.py
+python3 scripts/build-native-java-probe.py
+python3 scripts/build-native-host.py
+```
+
+The builders print their output paths under `build/<version>/<source-key>/`. A running Simulator is required only to install or test the app. Use `python3 scripts/build-native-host.py --run --simulator <id>` to build, install and launch, or set `BITWIG_SIMULATOR_ID`. You can find local IDs with `xcrun simctl list devices`. The Simulator uses a neutral app identifier unless you set `BITWIG_BUNDLE_PREFIX`.
+
+## Build for a development iPad
+
+Device builds additionally require XcodeGen, a trusted iPad with Developer Mode enabled, the local helper inputs in [THIRD_PARTY.md](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md), and Apple development signing with the required entitlements. The embedded packet tunnel uses the Network Extensions capability, which requires a supported paid program membership. The host and engine extension must both have access to the two registered App Groups. [Apple capability matrix](https://developer.apple.com/help/account/reference/supported-capabilities-ios/) · [App Group entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups)
+
+Set these variables locally for your own provisioning. The bundle suffixes for the app, engine, JIT helper and tunnel derive from one prefix. Keep the existing prefix and groups when updating an install.
+
+| Variable | Purpose |
+| --- | --- |
+| `BITWIG_BUNDLE_PREFIX` | Your reverse-DNS prefix. The host is `<prefix>.nativehost`. |
+| `BITWIG_DEVELOPMENT_TEAM` | Your Apple Developer team identifier. |
+| `BITWIG_APP_GROUP` | Registered group for the shared project and audio data. |
+| `BITWIG_IPC_GROUP` | Registered group for named semaphores, at most 14 characters including `group.`. |
+
+```sh
+python3 scripts/audit-native-port.py
+python3 scripts/build-native-engine-probe.py --device
 python3 scripts/build-native-host.py --device --embedded-tunnel --embedded-engine
 ```
 
-Generated files belong under `build/` and diagnostics under `evidence/`, both excluded from Git. The icon is generated locally into the build asset catalog.
+Use the same `BITWIG_APP` and identity configuration for all three commands. The build does not install the app on an iPad. Provision trust and pairing for the device locally. The existing helper reads `Documents/pairing.plist` from the installed app. Keep pairing records, signing materials, logs, generated files, and proprietary assets outside tracked source.
 
-## Limitations
+## Projects and Master Recording
 
-Saving/exporting remain subject to Bitwig activation and the native save panel is not implemented. Audio input, external audio routes, third-party plug-ins, full hardware-keyboard handling and multitouch are incomplete or unqualified. This prototype does not claim exhaustive crash coverage or production readiness.
+File → Save stores new projects in `BitwigUser/Projects` in the app's shared container. Reopen them from Recent Projects on the Bitwig Dashboard. Use the master meter's record button to capture the master output, and the adjacent folder button to open the project's `master-recordings` folder and preview the recording.
+
+## Experimental original plug-in editors
+
+The following opt-ins use matching locally installed desktop plug-ins. In Bitwig Settings → Plug-ins, select **with Bitwig**.
+
+### Surge XT and CHOW Tape Model CLAP
+
+Pass `--surge-clap "/path/to/Surge XT.clap"` to the iPad build with `--embedded-engine` to include a private copy of the supported Surge XT 1.3.4 desktop release. The build checks the original image, adapts its ARM64 slice, and signs it locally. This build uses Bitwig's device parameters by default.
+
+In the scripted iPad check, Surge’s original editor accepted Patch Browser text, opened its secondary-click menu, and dismissed the menu on Escape or an outside click. A Macro 1 drag updated Bitwig’s parameter and restored after project reopen. Surge’s original numeric **Edit Value** dialog updates the plug-in’s internal macro without sending the host notification that its drag path sends.
+
+Run `python3 tests/surge-clap-probe.py --help` using the [Surge CLAP probe](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/tests/surge-clap-probe.py) for the isolated Simulator check that reads the CLAP descriptor, changes and restores a parameter, and verifies note-on output and note-off release.
+
+The opt-in `--surge-editor-clap-include /path/to/clap/include` build enables the original Surge editor. The engine renders the live plug-in instance and the foreground app relays touches from its editor panel. The panel routes hardware keys and secondary clicks to the original editor. Surge’s context menus stay within the editor panel at the same scale. The same CLAP SDK include directory is used by `tests/surge-clap-probe.py --editor`, which checks isolated drawing, parameter edits, resizing, and cleanup alongside state and audio. Physical editor integration is experimental.
+
+The same probe accepts `--chow-editor` with the official CHOW Tape Model 2.11.0 desktop CLAP to exercise the shared editor adapter with a second JUCE plug-in in Simulator. Add `--chow-clap "/path/to/CHOWTapeModel.clap"` to the same iPad editor build to package that release alongside Surge XT.
+
+### Xfer OTT VST3
+
+Pass `--ott-vst3 "/path/to/OTT.vst3"` to the build with `--device`, `--embedded-engine` and a supported local installation of Xfer OTT 1.3.1. The build adapts the original ARM64 executable, keeps the original editor resources and signs the private copy locally. Find OTT from Xfer Records under Audio FX and open its native editor from the device panel.
+
+### Neural Amp Modeler VST3
+
+Pass `--nam-vst3 "/path/to/NeuralAmpModeler.vst3"` with `--device` and `--embedded-engine` to include the supported local Neural Amp Modeler 0.7.13 release. The build adapts the original ARM64 plug-in and compiles its matching upstream MetalNanoVG shader for iPadOS using the Xcode Metal toolchain. The original editor renders with Metal in the engine process and shares its completed frames with the foreground app. Its model and impulse response controls open the iPad Files picker. Selected `.nam` and `.wav` files are copied into the shared Bitwig user directory so saved projects can reopen them. The physical check presented the real Files picker and used scripted selection through its picker callback, then verified both assets after reopening the project.
+
+## Source checks
+
+Run `python3 tests/local-config.py` for [configuration validation](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/tests/local-config.py) and `python3 scripts/check-public-source.py` to [check a committed snapshot](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/scripts/check-public-source.py) for unexpected file types and common private-data patterns. The check reports categories only. It does not inspect external files or earlier history. Build artifacts and compatibility reports stay local. [Compatibility inventory, diagnostics, and targeted tests](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/docs/compatibility.md)
