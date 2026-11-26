@@ -552,12 +552,38 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
 #endif
 }
 
+static CGFloat const BWEditorToolbarHeight = 44;
+static CGFloat const BWEditorResizeHeight = 44;
+static CGFloat const BWEditorSceneMargin = 8;
+
+static CGRect editorArea(UIView *host) {
+    CGRect safe = UIEdgeInsetsInsetRect(host.bounds, host.safeAreaInsets);
+    return CGRectGetWidth(safe) > 2 * BWEditorSceneMargin && CGRectGetHeight(safe) > 2 * BWEditorSceneMargin
+        ? CGRectInset(safe, BWEditorSceneMargin, BWEditorSceneMargin) : safe;
+}
+
+static CGRect constrainEditorFrame(CGRect frame, CGRect area) {
+    frame.size.width = MIN(CGRectGetWidth(area), MAX(180, CGRectGetWidth(frame)));
+    frame.size.height = MIN(CGRectGetHeight(area), MAX(160, CGRectGetHeight(frame)));
+    frame.origin.x = MIN(MAX(CGRectGetMinX(area), frame.origin.x), CGRectGetMaxX(area) - frame.size.width);
+    frame.origin.y = MIN(MAX(CGRectGetMinY(area), frame.origin.y), CGRectGetMaxY(area) - frame.size.height);
+    return frame;
+}
+
 @interface BWEditorViewport : UIView
 @property(nonatomic, strong) BWEditorMapping *mapping;
 @property(nonatomic, strong) UIImageView *image;
 @property(nonatomic, strong) UIButton *closeButton;
+@property(nonatomic, strong) UIButton *fullscreenButton;
+@property(nonatomic, strong) UILabel *toolbar;
+@property(nonatomic, strong) UIImageView *resizeHandle;
+@property(nonatomic) CGRect floatingFrame;
+@property(nonatomic) CGRect gestureStartFrame;
+@property(nonatomic, weak) UIPanGestureRecognizer *frameGesture;
+@property(nonatomic) BOOL fullscreen;
 @property(nonatomic, strong) NSMutableArray<NSValue *> *pending;
 @property(nonatomic, strong) UITouch *contact;
+@property(nonatomic) BWEditorInput lastContactInput;
 @property(nonatomic) BOOL secondary;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSValue *> *heldKeys;
 @property(nonatomic) uint64_t sequence;
@@ -570,35 +596,136 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
 - (void)cancelDocument;
 #endif
 - (BOOL)refresh;
+- (void)activate;
+- (void)updateHostGeometry;
+- (void)endContactBeforeGeometryChange;
 @end
 
 @implementation BWEditorViewport
 - (instancetype)initWithFrame:(CGRect)frame {
     if (!(self = [super initWithFrame:frame])) return nil;
-    self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.backgroundColor = [UIColor colorWithWhite:0.05 alpha:0.9];
+    self.backgroundColor = [UIColor colorWithWhite:0.10 alpha:1];
+    self.layer.cornerRadius = 9;
+    self.layer.borderWidth = 1;
+    self.layer.borderColor = [UIColor colorWithWhite:0.27 alpha:1].CGColor;
+    self.clipsToBounds = YES;
     self.pending = [NSMutableArray new];
     self.heldKeys = [NSMutableDictionary new];
     self.image = [UIImageView new];
     [self addSubview:self.image];
+
+    self.toolbar = [UILabel new];
+    self.toolbar.text = @"Plug-in";
+    self.toolbar.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    self.toolbar.textColor = UIColor.whiteColor;
+    self.toolbar.userInteractionEnabled = YES;
+    [self.toolbar addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(adjustFrame:)]];
+    [self.toolbar addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(activate)]];
+    [self addSubview:self.toolbar];
+
     self.closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.closeButton setTitle:@"Close Plug-in" forState:UIControlStateNormal];
+    [self.closeButton setImage:[UIImage systemImageNamed:@"xmark"] forState:UIControlStateNormal];
+    self.closeButton.accessibilityLabel = @"Close Plug-in";
     [self.closeButton addTarget:self action:@selector(requestClose) forControlEvents:UIControlEventTouchUpInside];
     [self addSubview:self.closeButton];
+
+    self.fullscreenButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.fullscreenButton setImage:[UIImage systemImageNamed:@"arrow.up.left.and.arrow.down.right"] forState:UIControlStateNormal];
+    self.fullscreenButton.accessibilityLabel = @"Full Screen";
+    [self.fullscreenButton addTarget:self action:@selector(toggleFullscreen) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:self.fullscreenButton];
+
+    self.resizeHandle = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"arrow.down.right"]];
+    self.resizeHandle.contentMode = UIViewContentModeCenter;
+    self.resizeHandle.tintColor = UIColor.systemGrayColor;
+    self.resizeHandle.userInteractionEnabled = YES;
+    [self.resizeHandle addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(adjustFrame:)]];
+    [self addSubview:self.resizeHandle];
     return self;
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGRect area = UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets);
-    self.closeButton.frame = CGRectMake(CGRectGetMaxX(area) - 132, CGRectGetMinY(area), 128, 40);
-    CGRect available = CGRectInset(area, 12, 12);
-    available.origin.y += 36;
-    available.size.height -= 36;
-    CGFloat scale = MIN(available.size.width / MAX(1, self.editorSize.width),
-                        available.size.height / MAX(1, self.editorSize.height));
+    CGFloat width = CGRectGetWidth(self.bounds);
+    CGFloat height = CGRectGetHeight(self.bounds);
+    self.closeButton.frame = CGRectMake(width - BWEditorToolbarHeight, 0, BWEditorToolbarHeight, BWEditorToolbarHeight);
+    self.fullscreenButton.frame = CGRectOffset(self.closeButton.frame, -BWEditorToolbarHeight, 0);
+    self.toolbar.frame = CGRectMake(12, 0, MAX(0, CGRectGetMinX(self.fullscreenButton.frame) - 12), BWEditorToolbarHeight);
+    self.resizeHandle.frame = CGRectMake(width - BWEditorResizeHeight, height - BWEditorResizeHeight,
+                                         BWEditorResizeHeight, BWEditorResizeHeight);
+    CGRect content = CGRectMake(1, BWEditorToolbarHeight, MAX(0, width - 2),
+                                 MAX(0, height - BWEditorToolbarHeight - (self.fullscreen ? 1 : BWEditorResizeHeight)));
+    CGFloat scale = MIN(CGRectGetWidth(content) / MAX(1, self.editorSize.width),
+                        CGRectGetHeight(content) / MAX(1, self.editorSize.height));
     CGSize display = CGSizeMake(self.editorSize.width * scale, self.editorSize.height * scale);
-    self.image.frame = CGRectMake(CGRectGetMidX(available) - display.width / 2,
-                                  CGRectGetMidY(available) - display.height / 2, display.width, display.height);
+    self.image.frame = CGRectMake(CGRectGetMidX(content) - display.width / 2,
+                                  CGRectGetMidY(content) - display.height / 2, display.width, display.height);
+}
+- (void)updateHostGeometry {
+    if (!self.superview) return;
+    CGRect area = editorArea(self.superview);
+    if (CGRectIsEmpty(area)) return;
+    if (CGRectIsEmpty(self.floatingFrame)) {
+        // Start at the editor's native point size when it fits the workspace.
+        CGFloat scale = MIN(1, MIN(CGRectGetWidth(area) * 0.70 / MAX(1, self.editorSize.width),
+                                  (CGRectGetHeight(area) * 0.74 - BWEditorToolbarHeight - BWEditorResizeHeight) /
+                                      MAX(1, self.editorSize.height)));
+        CGFloat width = MAX(180, self.editorSize.width * scale + 2);
+        CGFloat height = MAX(160, self.editorSize.height * scale + BWEditorToolbarHeight + BWEditorResizeHeight);
+        NSUInteger count = 0;
+        for (UIView *sibling in self.superview.subviews)
+            if (sibling != self && [sibling isKindOfClass:BWEditorViewport.class]) count++;
+        CGFloat offset = (count % 5) * 24;
+        self.floatingFrame = CGRectMake(CGRectGetMidX(area) - width / 2 + offset,
+                                        CGRectGetMidY(area) - height / 2 + offset, width, height);
+    }
+    CGRect frame = self.fullscreen ? area : constrainEditorFrame(self.floatingFrame, area);
+    if (!CGRectEqualToRect(self.frame, frame)) {
+        [self endContactBeforeGeometryChange];
+        self.frame = frame;
+    }
+}
+- (void)activate {
+    if (self.closing) return;
+    [self.superview bringSubviewToFront:self];
+    if (self.isFirstResponder) return;
+    [UIApplication.sharedApplication sendAction:@selector(bwRememberEditorResponder:) to:nil from:self forEvent:nil];
+    [self becomeFirstResponder];
+}
+- (void)adjustFrame:(UIPanGestureRecognizer *)gesture {
+    if (!self.superview || self.fullscreen || self.closing || self.contact) return;
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        if (self.frameGesture) return;
+        [self activate];
+        self.frameGesture = gesture;
+        self.gestureStartFrame = self.frame;
+    } else if (self.frameGesture != gesture) {
+        return;
+    }
+    if (gesture.state != UIGestureRecognizerStateBegan && gesture.state != UIGestureRecognizerStateChanged)
+        self.frameGesture = nil;
+    if (gesture.state == UIGestureRecognizerStateCancelled || gesture.state == UIGestureRecognizerStateFailed) return;
+    CGPoint delta = [gesture translationInView:self.superview];
+    CGRect frame = self.gestureStartFrame;
+    CGRect area = editorArea(self.superview);
+    if (gesture.view == self.resizeHandle) {
+        frame.size.width = MIN(CGRectGetMaxX(area) - CGRectGetMinX(frame), CGRectGetWidth(frame) + delta.x);
+        frame.size.height = MIN(CGRectGetMaxY(area) - CGRectGetMinY(frame), CGRectGetHeight(frame) + delta.y);
+    } else {
+        frame = CGRectOffset(frame, delta.x, delta.y);
+    }
+    self.floatingFrame = constrainEditorFrame(frame, area);
+    [self updateHostGeometry];
+}
+- (void)toggleFullscreen {
+    [self activate];
+    if (self.contact || self.frameGesture || self.closing) return;
+    self.fullscreen = !self.fullscreen;
+    self.resizeHandle.hidden = self.fullscreen;
+    NSString *icon = self.fullscreen ? @"arrow.down.right.and.arrow.up.left" : @"arrow.up.left.and.arrow.down.right";
+    [self.fullscreenButton setImage:[UIImage systemImageNamed:icon] forState:UIControlStateNormal];
+    self.fullscreenButton.accessibilityLabel = self.fullscreen ? @"Restore Floating Window" : @"Full Screen";
+    [self updateHostGeometry];
+    [self setNeedsLayout];
 }
 - (void)requestClose { self.closing = YES; }
 - (BOOL)canBecomeFirstResponder { return YES; }
@@ -616,10 +743,13 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
     [self.pending.lastObject getValue:&last size:sizeof(last)];
     if (isMove(phase) && last.phase == phase) [self.pending removeLastObject];
     if (isMove(phase) && self.pendingWithReleases >= BWEditorPointerCapacity) return;
+    self.lastContactInput = event;
     [self enqueue:event];
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     UITouch *touch = touches.anyObject;
+    if (self.closing || self.frameGesture) return;
+    [self activate];
     if (self.contact || self.pendingWithReleases > BWEditorPointerCapacity - 2 ||
         !CGRectContainsPoint(self.image.frame, [touch locationInView:self])) return;
     self.contact = touch;
@@ -637,7 +767,14 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
     self.contact = nil;
 }
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self touchesEnded:touches withEvent:event];
+    if (self.contact && [touches containsObject:self.contact]) [self endContactBeforeGeometryChange];
+}
+- (void)endContactBeforeGeometryChange {
+    if (!self.contact) return;
+    BWEditorInput release = self.lastContactInput;
+    release.phase = self.secondary ? BWEditorSecondaryUp : BWEditorPointerUp;
+    self.contact = nil;
+    if (!self.closing) [self enqueue:release];
 }
 - (void)sendKeyboard:(NSSet<UIPress *> *)presses down:(BOOL)down {
     if (self.closing) return;
@@ -769,6 +906,7 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
     CGColorSpaceRelease(color);
     CGDataProviderRelease(provider);
     if (!CGSizeEqualToSize(self.editorSize, editorSize)) {
+        [self endContactBeforeGeometryChange];
         self.editorSize = editorSize;
         [self setNeedsLayout];
     }
@@ -778,7 +916,9 @@ void BWStopPublishingDetachedEditor(BWEditorPublisher *publisher) {
 
 @implementation UIResponder (BWEditorFocus)
 - (void)bwRememberEditorResponder:(BWEditorViewport *)viewport {
-    if (self.isFirstResponder) viewport.priorResponder = self;
+    if (!self.isFirstResponder) return;
+    viewport.priorResponder = [self isKindOfClass:BWEditorViewport.class]
+        ? ((BWEditorViewport *)self).priorResponder : self;
 }
 @end
 
@@ -790,12 +930,50 @@ static BOOL responderInWindow(UIResponder *responder, UIWindow *window) {
     return NO;
 }
 
+@interface BWEditorWorkspaceTap : UITapGestureRecognizer <UIGestureRecognizerDelegate>
+@end
+
+@implementation BWEditorWorkspaceTap
+- (instancetype)init {
+    if (!(self = [super initWithTarget:nil action:nil])) return nil;
+    [self addTarget:self action:@selector(restoreWorkspaceFocus)];
+    self.delegate = self;
+    self.cancelsTouchesInView = NO;
+    self.delaysTouchesBegan = NO;
+    self.delaysTouchesEnded = NO;
+    return self;
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)recognizer shouldReceiveTouch:(UITouch *)touch {
+    for (UIView *view = touch.view; view && view != self.view; view = view.superview)
+        if ([view isKindOfClass:BWEditorViewport.class]) return NO;
+    return YES;
+}
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)recognizer
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
+- (void)restoreWorkspaceFocus {
+    UIWindow *window = self.view.window;
+    if (self.state != UIGestureRecognizerStateRecognized || !window.isKeyWindow ||
+        window.windowScene.activationState != UISceneActivationStateForegroundActive) return;
+    for (UIView *subview in self.view.subviews) {
+        if (![subview isKindOfClass:BWEditorViewport.class] || !subview.isFirstResponder) continue;
+        BWEditorViewport *viewport = (BWEditorViewport *)subview;
+        UIResponder *prior = viewport.priorResponder;
+        if (responderInWindow(prior, window)) [prior becomeFirstResponder];
+        else [viewport resignFirstResponder];
+        break;
+    }
+}
+@end
+
 void BWPollDetachedEditors(UIWindowScene *scene) {
     static NSMutableDictionary<NSURL *, BWEditorViewport *> *viewports;
     if (!viewports) viewports = [NSMutableDictionary new];
     for (NSURL *url in viewports.allKeys) {
         BWEditorViewport *viewport = viewports[url];
         if ([viewport refresh]) {
+            [viewport updateHostGeometry];
 #if BW_IPLUG_EDITOR
             [viewport pollDocument];
 #endif
@@ -807,8 +985,15 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
         UIWindow *window = viewport.window;
         BOOL focused = viewport.isFirstResponder;
         UIResponder *prior = viewport.priorResponder;
+        UIView *host = viewport.superview;
         [viewport removeFromSuperview];
         [viewports removeObjectForKey:url];
+        BOOL hasEditors = NO;
+        for (UIView *sibling in host.subviews)
+            if ([sibling isKindOfClass:BWEditorViewport.class]) hasEditors = YES;
+        if (!hasEditors)
+            for (UIGestureRecognizer *recognizer in host.gestureRecognizers)
+                if ([recognizer isKindOfClass:BWEditorWorkspaceTap.class]) [host removeGestureRecognizer:recognizer];
         if (focused && window.isKeyWindow && window.windowScene.activationState == UISceneActivationStateForegroundActive &&
             responderInWindow(prior, window)) [prior becomeFirstResponder];
     }
@@ -836,12 +1021,16 @@ void BWPollDetachedEditors(UIWindowScene *scene) {
             continue;
         }
         if (!ready) continue;
-        BWEditorViewport *viewport = [[BWEditorViewport alloc] initWithFrame:host.bounds];
+        BWEditorViewport *viewport = [[BWEditorViewport alloc] initWithFrame:CGRectZero];
         viewport.mapping = mapping;
         if (![viewport refresh]) continue;
         [host addSubview:viewport];
-        [UIApplication.sharedApplication sendAction:@selector(bwRememberEditorResponder:) to:nil from:viewport forEvent:nil];
-        [viewport becomeFirstResponder];
+        [viewport updateHostGeometry];
+        [viewport activate];
+        BOOL observesWorkspace = NO;
+        for (UIGestureRecognizer *recognizer in host.gestureRecognizers)
+            if ([recognizer isKindOfClass:BWEditorWorkspaceTap.class]) observesWorkspace = YES;
+        if (!observesWorkspace) [host addGestureRecognizer:[BWEditorWorkspaceTap new]];
         viewports[url] = viewport;
     }
 }
