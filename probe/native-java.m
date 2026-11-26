@@ -3,10 +3,76 @@
 #import "../native/compat/Trace.h"
 #include <dlfcn.h>
 #include <jni.h>
+#include <stdio.h>
+#include <sys/stat.h>
 #import <objc/message.h>
 #import <TargetConditionals.h>
 #ifdef EMBEDDED_ENGINE
 extern BOOL BWInstallEngineProcessAdapter(JNIEnv *env);
+
+static NSDictionary<NSString *, NSURL *> *BWRefreshManagedPlugins(NSURL *frameworks) {
+    NSURL *root = BWManagedPluginRoot();
+    if (!root) return nil;
+
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSMutableArray *clap = [@[@"Surge XT.clap", @"CHOWTapeModel.clap"] mutableCopy];
+    NSURL *manifestURL = [frameworks URLByAppendingPathComponent:@"fabfilter-clap.json"];
+    NSData *data = [NSData dataWithContentsOfURL:manifestURL];
+    id manifest = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if ([manifest isKindOfClass:NSDictionary.class]) {
+        for (NSString *name in manifest) {
+            if ([name isEqualToString:name.lastPathComponent] &&
+                [name hasPrefix:@"FabFilter "] && [name.pathExtension isEqualToString:@"clap"])
+                [clap addObject:name];
+        }
+    }
+    NSDictionary<NSString *, NSArray<NSString *> *> *bundles = @{
+        @"CLAP":clap, @"VST3":@[@"OTT.vst3", @"NeuralAmpModeler.vst3"],
+    };
+
+    NSString *ownerFile = @".managed-discovery-v1";
+    struct stat state = {};
+    if (lstat(root.fileSystemRepresentation, &state) == 0) {
+        if (!S_ISDIR(state.st_mode) || ![files fileExistsAtPath:[root URLByAppendingPathComponent:ownerFile].path]) return nil;
+    } else if (errno != ENOENT) {
+        return nil;
+    }
+
+    NSURL *parent = root.URLByDeletingLastPathComponent;
+    NSString *name = [@"." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSURL *staging = [parent URLByAppendingPathComponent:name isDirectory:YES];
+    if (![files createDirectoryAtURL:staging withIntermediateDirectories:NO attributes:nil error:nil]) return nil;
+    @try {
+        NSMutableDictionary<NSString *, NSURL *> *discovery = [NSMutableDictionary new];
+        for (NSString *format in bundles) {
+            NSURL *folder = [staging URLByAppendingPathComponent:format isDirectory:YES];
+            for (NSString *bundle in bundles[format]) {
+                NSURL *target = [frameworks URLByAppendingPathComponent:bundle isDirectory:YES];
+                BOOL directory = NO;
+                if (![files fileExistsAtPath:target.path isDirectory:&directory] || !directory) continue;
+                if (!discovery[format]) {
+                    if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO attributes:nil error:nil]) return nil;
+                    discovery[format] = [root URLByAppendingPathComponent:format isDirectory:YES];
+                }
+                NSURL *alias = [folder URLByAppendingPathComponent:bundle];
+                if (![files createDirectoryAtURL:alias withIntermediateDirectories:NO attributes:nil error:nil]) return nil;
+                alias = [alias URLByAppendingPathComponent:@"Contents"];
+                target = [target URLByAppendingPathComponent:@"Contents" isDirectory:YES];
+                if (![files fileExistsAtPath:target.path isDirectory:&directory] || !directory) return nil;
+                if (![files createSymbolicLinkAtURL:alias withDestinationURL:target error:nil]) return nil;
+            }
+        }
+        NSURL *owner = [staging URLByAppendingPathComponent:ownerFile];
+        if (![[NSData data] writeToURL:owner options:0 error:nil]) return nil;
+        // Publish a fully populated catalog in one filesystem operation.
+        if (renamex_np(staging.fileSystemRepresentation, root.fileSystemRepresentation, RENAME_EXCL) != 0 &&
+            (errno != EEXIST || renamex_np(staging.fileSystemRepresentation, root.fileSystemRepresentation, RENAME_SWAP) != 0))
+            return nil;
+        return discovery;
+    } @finally {
+        [files removeItemAtURL:staging error:nil];
+    }
+}
 #endif
 
 #ifdef STATIC_ZERO
@@ -147,17 +213,12 @@ static void runJava(void) {
     dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
     if(!prepared){report[@"phase"]=@"embedded JIT unavailable";save();return;}
 #endif
-    NSString *pluginFolder=[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks"];
-    NSFileManager *files = NSFileManager.defaultManager;
-    if ([files fileExistsAtPath:[pluginFolder stringByAppendingPathComponent:@"Surge XT.clap"]] ||
-        [files fileExistsAtPath:[pluginFolder stringByAppendingPathComponent:@"fabfilter-clap.json"]])
-        setenv("CLAP_PATH", pluginFolder.fileSystemRepresentation, 1);
-    for (NSString *name in @[@"OTT.vst3", @"NeuralAmpModeler.vst3"]) {
-        if ([NSFileManager.defaultManager fileExistsAtPath:[pluginFolder stringByAppendingPathComponent:name]]) {
-            setenv("VST3_PATH",pluginFolder.fileSystemRepresentation,1);
-            break;
-        }
-    }
+#ifdef EMBEDDED_ENGINE
+    NSURL *frameworks = [NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Frameworks" isDirectory:YES];
+    NSDictionary<NSString *, NSURL *> *discovery = BWRefreshManagedPlugins(frameworks);
+    for (NSString *format in discovery)
+        setenv([[format stringByAppendingString:@"_PATH"] UTF8String], discovery[format].fileSystemRepresentation, 1);
+#endif
     setenv("JAVA_HOME", home.fileSystemRepresentation, 1);
 #ifdef STATIC_ZERO
 #ifndef SOURCE_ZERO

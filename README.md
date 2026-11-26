@@ -77,6 +77,8 @@ File → Save stores new projects in `BitwigUser/Projects` in the app's shared c
 
 The following opt-ins use matching locally installed desktop plug-ins. In Bitwig Settings → Plug-ins, select **with Bitwig**.
 
+Device builds register staged CLAP and VST3 plug-ins through stable discovery folders in the app group. The plug-in binaries remain in the signed app. Adding a plug-in requires a signed build with its opt-in below. The iPad Files picker handles editor assets such as Neural Amp Modeler models and impulse responses.
+
 Editors open in floating panels, with the Arrangement usable around them. Drag the toolbar to move, drag the lower-right handle to resize the display, or use the toolbar buttons to go fullscreen, restore the previous floating size, or close.
 
 ### Surge XT and CHOW Tape Model CLAP

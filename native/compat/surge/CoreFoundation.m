@@ -1,6 +1,7 @@
-#import <Foundation/Foundation.h>
+#import "../LocalConfiguration.h"
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <mach-o/loader.h>
 #include <unistd.h>
 
@@ -53,7 +54,24 @@ static NSString *embeddedPluginBinary(CFBundleRef bundle, void ***slot) {
     if ([app.pathExtension isEqualToString:@"appex"])
         app=app.URLByDeletingLastPathComponent.URLByDeletingLastPathComponent;
     NSURL *frameworks=[app URLByAppendingPathComponent:@"Frameworks" isDirectory:YES];
-    NSString *path=url.URLByStandardizingPath.path;
+    NSString *path = url.URLByStandardizingPath.path;
+    NSString *name = url.lastPathComponent;
+    NSString *format = url.pathExtension.uppercaseString;
+    if ([format isEqualToString:@"CLAP"] || [format isEqualToString:@"VST3"]) {
+        NSURL *managed = [BWManagedPluginRoot() URLByAppendingPathComponent:format isDirectory:YES];
+        NSURL *alias = [managed URLByAppendingPathComponent:name];
+        if ([path isEqualToString:alias.URLByStandardizingPath.path]) {
+            NSURL *approved = [frameworks URLByAppendingPathComponent:name];
+            struct stat wrapper = {}, link = {};
+            NSURL *contents = [url URLByAppendingPathComponent:@"Contents"];
+            NSURL *approvedContents = [approved URLByAppendingPathComponent:@"Contents" isDirectory:YES];
+            if (lstat(url.fileSystemRepresentation, &wrapper) != 0 || !S_ISDIR(wrapper.st_mode) ||
+                lstat(contents.fileSystemRepresentation, &link) != 0 || !S_ISLNK(link.st_mode) ||
+                ![contents.URLByResolvingSymlinksInPath.path isEqualToString:approvedContents.URLByResolvingSymlinksInPath.path])
+                return nil;
+            path = approved.URLByStandardizingPath.path;
+        }
+    }
     if ([path isEqualToString:[frameworks URLByAppendingPathComponent:@"Surge XT.clap"].URLByStandardizingPath.path]) {
         if (slot) *slot=&surgeImage;
         return [frameworks URLByAppendingPathComponent:@"SurgeXT.bundle"].path;
@@ -72,7 +90,6 @@ static NSString *embeddedPluginBinary(CFBundleRef bundle, void ***slot) {
         if (slot) *slot=&namImage;
         return [frameworks URLByAppendingPathComponent:@"NeuralAmpModeler.bundle"].path;
     }
-    NSString *name = url.lastPathComponent;
     if ([name hasPrefix:@"FabFilter "] && [name hasSuffix:@".clap"] &&
         [path isEqualToString:[frameworks URLByAppendingPathComponent:name].URLByStandardizingPath.path]) {
         NSDictionary *record = fabFilterManifest(frameworks)[name];
