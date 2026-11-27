@@ -90,6 +90,12 @@ public final class GridSourceSelection {
         FGj current = Ymy.beI();
         if (current == null || dispatcher == null || !dispatcher.isEventDispatchThread()) return false;
         if (dispatcher == current) return true;
+        // The application event and its document wrapper share the original
+        // application queue. Verify both the document and actual queue identity.
+        if (dispatcher instanceof drM && current instanceof drL) {
+            return dispatcher.MgQ() == document && current.isEventDispatchThread() &&
+                dispatcher.getParallelAsyncTaskHandler() == current.getParallelAsyncTaskHandler();
+        }
         // The original document dispatcher delivers its events through its
         // own qx instance, which is then the actual stock queue context.
         if (dispatcher.getClass() != qE.class || ((qE)dispatcher).beI() != document) return false;
