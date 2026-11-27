@@ -1,3 +1,4 @@
+import com.bitwig.flt.document.core.master.CmH;
 import com.bitwig.flt.document.core.master.device.JXr;
 import com.bitwig.flt.document.core.master.device.ZFS;
 import com.bitwig.flt.document.core.master.device.nWI;
@@ -8,6 +9,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -95,6 +97,19 @@ public final class GridSourceSelection {
         }
         // Stock project decode can finish nJV before document attachment.
         // Its first attached source capture completes this pending owner.
+    }
+
+    public static void documentReady(CmH document) {
+        var dispatcher = document.waj();
+        if (dispatcher == null || dispatcher != Ymy.beI() || !dispatcher.isEventDispatchThread()) return;
+        List<utt> owners;
+        synchronized (pending) {
+            owners = List.copyOf(pending.keySet());
+        }
+        for (utt owner : owners) {
+            if (owner.cc_() == document && owner.waj() == dispatcher && pending.containsKey(owner))
+                completeReadiness(owner,null);
+        }
     }
 
     private static void completeReadiness(utt owner,TLG choosing) {
