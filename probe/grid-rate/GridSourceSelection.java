@@ -5,6 +5,7 @@ import com.bitwig.flt.document.core.master.device.nWI;
 import com.bitwig.flt.document.core.master.device.utt;
 import com.bitwig.flt.document.core.master.device.wh2;
 import com.bitwig.nitro.vP2;
+import com.bitwig.ramona.core.ClS;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
@@ -70,11 +71,39 @@ public final class GridSourceSelection {
         }
     }
 
-    private static boolean onModelThread(utt owner) {
+    private static final class DocumentDispatcher {
+        static final Field executor = executorField();
+
+        private static Field executorField() {
+            try {
+                Field field = qE.class.getDeclaredField("sCA");
+                if (field.getType() != qx.class) throw new IllegalStateException("Unexpected stock document executor");
+                field.setAccessible(true);
+                return field;
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException("Stock document dispatcher differs",error);
+            }
+        }
+    }
+
+    private static boolean onDocumentThread(CmH document,ClS dispatcher) {
         FGj current = Ymy.beI();
-        if (current == null) return false;
-        var dispatcher = owner.waj();
-        return dispatcher == current && dispatcher.isEventDispatchThread();
+        if (current == null || dispatcher == null || !dispatcher.isEventDispatchThread()) return false;
+        if (dispatcher == current) return true;
+        // The original document dispatcher delivers its events through its
+        // own qx instance, which is then the actual stock queue context.
+        if (dispatcher.getClass() != qE.class || ((qE)dispatcher).beI() != document) return false;
+        try {
+            return DocumentDispatcher.executor.get(dispatcher) == current;
+        } catch (IllegalAccessException error) {
+            throw new IllegalStateException("Cannot read the stock document executor",error);
+        }
+    }
+
+    private static boolean onModelThread(utt owner) {
+        CmH document = owner.cc_();
+        ClS dispatcher = owner.waj();
+        return document != null && document.waj() == dispatcher && onDocumentThread(document,dispatcher);
     }
 
     public static void modelReady(utt owner) {
@@ -101,7 +130,7 @@ public final class GridSourceSelection {
 
     public static void documentReady(CmH document) {
         var dispatcher = document.waj();
-        if (dispatcher == null || dispatcher != Ymy.beI() || !dispatcher.isEventDispatchThread()) return;
+        if (!onDocumentThread(document,dispatcher)) return;
         List<utt> owners;
         synchronized (pending) {
             owners = List.copyOf(pending.keySet());
