@@ -301,9 +301,16 @@ static void runJava(void) {
     BWCompatibilityTrace("dlsym", "frontend", "JNI_CreateJavaVM", create ? "resolved" : "missing");
     if (!create) { report[@"error"] = @"JNI_CreateJavaVM not exported"; save(); return; }
 #endif
+    NSString *appBundle = NSBundle.mainBundle.bundlePath;
+    NSString *classpath = [NSString stringWithFormat:@"%@/bitwig.jar:%@/libs.jar", appBundle, appBundle];
+#if defined(GRID_RATE_OVERLAY)
+    NSString *overlay = [NSBundle.mainBundle pathForResource:@"GridRate" ofType:@"jar"];
+    if (!overlay) { report[@"error"] = @"Grid rate overlay missing"; save(); return; }
+    classpath = [NSString stringWithFormat:@"%@:%@", overlay, classpath];
+#endif
     NSMutableArray *values = [@[@"-Xint", @"-Xms32m", @"-Xmx512m", @"-XX:+UseSerialGC", @"-XX:ReservedCodeCacheSize=64m",
         [@"-Djava.home=" stringByAppendingString:home],
-        [NSString stringWithFormat:@"-Djava.class.path=%@/bitwig.jar:%@/libs.jar", NSBundle.mainBundle.bundlePath, NSBundle.mainBundle.bundlePath],
+        [@"-Djava.class.path=" stringByAppendingString:classpath],
         [NSString stringWithFormat:@"-XX:ErrorFile=%@/hs_err.log", documents]] mutableCopy];
 #if defined(FULL_BITWIG_HOST) && !defined(STATIC_ZERO)
     if (BWCompatibilityTracing()) {
