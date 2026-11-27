@@ -21,6 +21,7 @@ final class PatchGridPolicy implements Opcodes {
     private static final String SETTER="bwSetGridOneX";
     private static final String GETTER="bwIsGridOneX";
     private static final String OBSERVERS="bwGridPolicyObservers";
+    private static final String QUALIFICATION="bwGridQualificationListeners";
     static final String PROPERTY="bitwigipad_grid_one_x";
     private static final int STOCK_ACTIVE_STYLE=410;
 
@@ -38,9 +39,23 @@ final class PatchGridPolicy implements Opcodes {
         var reader=new ClassReader(input);
         var output=new ClassWriter(reader,ClassWriter.COMPUTE_MAXS);
         int[] registration={0};
+        int[] readySites={0};
         reader.accept(new ClassVisitor(ASM9,output) {
             public MethodVisitor visitMethod(int access,String method,String desc,String signature,String[] exceptions) {
                 MethodVisitor next=super.visitMethod(access,method,desc,signature,exceptions);
+                if (!schema && method.equals("nJV") && desc.equals("()V")) {
+                    return new MethodVisitor(ASM9,next) {
+                        @Override
+                        public void visitInsn(int instruction) {
+                            if (instruction == RETURN) {
+                                super.visitVarInsn(ALOAD,0);
+                                super.visitMethodInsn(INVOKESTATIC,"GridSourceSelection","modelReady","(L"+UTT+";)V",false);
+                                readySites[0]++;
+                            }
+                            super.visitInsn(instruction);
+                        }
+                    };
+                }
                 if (!schema || !method.equals("beI") || !desc.equals("(Ljava/util/List;)V")) return next;
                 return new MethodVisitor(ASM9,next) {
                     public void visitInsn(int instruction) {
@@ -64,6 +79,8 @@ final class PatchGridPolicy implements Opcodes {
                 } else {
                     super.visitField(0,FIELD,"Z",null,null).visitEnd();
                     super.visitField(ACC_PRIVATE,OBSERVERS,"LuLF;",null,null).visitEnd();
+                    super.visitField(ACC_PRIVATE,QUALIFICATION,"LuLF;",null,null).visitEnd();
+                    qualificationAccessor(this);
                     observerAccessor(this,true);
                     observerAccessor(this,false);
                     getter(this);
@@ -72,7 +89,8 @@ final class PatchGridPolicy implements Opcodes {
                 super.visitEnd();
             }
         },0);
-        if (registration[0]!=(schema?1:0)) throw new IllegalStateException("Unexpected field enumeration");
+        if (registration[0]!=(schema?1:0) || readySites[0]!=(schema?0:1))
+            throw new IllegalStateException("Unexpected Grid schema or model lifecycle");
         byte[] bytes=output.toByteArray();
         bytes[7]=69;
         Path path=root.resolve("classes").resolve(BASE+name+".class");
@@ -182,6 +200,29 @@ final class PatchGridPolicy implements Opcodes {
             method.visitFrame(F_SAME,0,null,0,null);
         }
         method.visitInsn(RETURN);
+        method.visitMaxs(0,0);
+        method.visitEnd();
+    }
+
+    private static void qualificationAccessor(ClassVisitor visitor) {
+        MethodVisitor method = visitor.visitMethod(ACC_FINAL,"bwGridQualificationObservers","(Z)LuLF;",null,null);
+        Label ready = new Label();
+        method.visitCode();
+        method.visitVarInsn(ALOAD,0);
+        method.visitFieldInsn(GETFIELD,UTT,QUALIFICATION,"LuLF;");
+        method.visitJumpInsn(IFNONNULL,ready);
+        method.visitVarInsn(ILOAD,1);
+        method.visitJumpInsn(IFEQ,ready);
+        method.visitVarInsn(ALOAD,0);
+        method.visitTypeInsn(NEW,"uLF");
+        method.visitInsn(DUP);
+        method.visitMethodInsn(INVOKESPECIAL,"uLF","<init>","()V",false);
+        method.visitFieldInsn(PUTFIELD,UTT,QUALIFICATION,"LuLF;");
+        method.visitLabel(ready);
+        method.visitFrame(F_SAME,0,null,0,null);
+        method.visitVarInsn(ALOAD,0);
+        method.visitFieldInsn(GETFIELD,UTT,QUALIFICATION,"LuLF;");
+        method.visitInsn(ARETURN);
         method.visitMaxs(0,0);
         method.visitEnd();
     }

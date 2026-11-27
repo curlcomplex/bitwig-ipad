@@ -8,7 +8,7 @@ import java.util.ArrayList;
 /** One immutable, already-qualified source choice for the stock compiler. */
 final class GridVariantInput extends vP2 {
     // Advance the suffix when a rate rule changes generated DSP semantics.
-    private static final String CACHE_SUFFIX = ":bitwigipad-grid-1x-v3";
+    private static final String CACHE_SUFFIX = ":bitwigipad-grid-1x-v4";
     private final vP2 original;
     private final boolean passthrough;
     private final boolean builtinPulse;

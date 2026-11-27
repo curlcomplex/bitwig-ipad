@@ -97,9 +97,10 @@ final class VerifyGridPolicy {
         require(!field.Bqk(first) && field.Bqk(cloned),"independent after clone");
         require(changes.size()==2 && Boolean.FALSE.equals(changes.getLast().Gef()) &&
             Boolean.TRUE.equals(changes.getLast().MgQ()),"original observer gets one false change");
-        require(choiceChanges.size()==2 && choiceChanges.getFirst().beI()==choice && "1×".equals(choiceChanges.getFirst().Gef()) &&
+        require(choiceChanges.size()==2 && choiceChanges.getFirst().beI()==choice && "4×".equals(choiceChanges.getFirst().Gef()) &&
             "4×".equals(choiceChanges.getFirst().MgQ()) && "4×".equals(choiceChanges.getLast().Gef()) &&
-            "1×".equals(choiceChanges.getLast().MgQ()),"stock UI event observes translated old and new values");
+            "4×".equals(choiceChanges.getLast().MgQ()) && !choice.isSettable(),
+            "unqualified owner reports stock rate through the original UI event");
         choice.removeListener(choiceObserver);
         field.Gef(first,observer);
         field.sCA(first,true);

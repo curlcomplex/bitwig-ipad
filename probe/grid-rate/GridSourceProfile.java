@@ -12,6 +12,17 @@ final class GridSourceProfile {
     private record Named(String digest, Rule rule) {}
 
     private static final Map<String, Named> ARCHIVE = Map.ofEntries(
+        variant("mod_fx/frequency_shifter_module.nitro", "ce62607a4add4e956bab1ad7ac2850bc1d3bea7d473692871411b1bbe12f09dd"),
+        variant("device/saturator/bwlpf.nitro", "2e063ab49bc16bd5b03a404dcb52e44daf7c259c77a4b4292990c0cd178fdd53"),
+        variant("grid/shaper/diode_clipper.nitro", "4583a08c4e7a5d93e1f8ee60da53d09c71b8141ed561409d0eb73f8b4f709e0b"),
+        variant("grid/shaper/howl.nitro", "f5952fe88845184a7a48070fdfca35272a923cdfe2f41cd1188b33200f872e69"),
+        variant("grid/shaper/quantizer.nitro", "1cbe6986dbb33993662d47deed8719f1782bfb23496976f88a40cd95da21f090"),
+        variant("mod_fx/pitch_shifter_module.nitro", "2cf20819fec1ea3d2a680ed967654c32d02992069caea2fd57bf2cda3be6d8e3"),
+        variant("envelope/Pluck.nitro", "ad4478151a3afe00fcd71739b322426920dd3f87a2191edc40eb499b1cd678b5"),
+        variant("grid/io/midi_cc_in.nitro", "b36abb95113f5dbb276403a7fb7668c1f962043818e3d86df2a93bd998dfd580"),
+        variant("grid/io/note_out_plus.nitro", "1aaa157e0975a415637a49580895139610450911ea23ebf6db4580b48a412703"),
+        Map.entry("sampler/grain_size_and_density.nitro",
+            new Named("55f6ab1da63538dc5a8f69aa4f360ef904a53f601ed0d774656dfa35b1dcbb3a", Rule.CARRIER)),
         variant("lfo/sh_lfo/LFOPhasor.nitro", "eacde6f24e989a5579b07161fba8e094504692fda63f8486cf28fc52fba013b9"),
         Map.entry("grid/mix/merge.nitro", new Named("c83a9711d9ce8421f265c0314490815f6b5ac24be7adeec51cb3fc2443ef574e", Rule.CARRIER)),
         Map.entry("grid/mix/split.nitro", new Named("4250ded4fac4bcf8a00f5e4d8dae9a4e5684753c427cd1c88c7d475fa152ab75", Rule.CARRIER)),
@@ -20,6 +31,7 @@ final class GridSourceProfile {
         Map.entry("grid/pitch/grid_pitch_quantize.nitro", new Named("ac4dda1f13a6068ec26033d448ec18f1ccba2f8aa89c5a0b9a77ef5970f52a7a", Rule.CARRIER)),
         Map.entry("grid/pitch/grid_scale_steps.nitro", new Named("0c35d56a23b4029aa3dbee1816a978861390e6aa2bbe0834a95e6f1356ab5c3b", Rule.CARRIER)),
         variant("grid/mix/voice_stack_mixer.nitro", "a0d5e154d3fc9e14ca11d37b276144106695788bd9cb40ff76d536945148aae9"),
+        variant("filter/comb.nitro", "8081ee4cec1598a716a37ec3241371bb6bbe935db38ba4f13273b3befc54b451"),
         variant("filter/Vowel.nitro", "3808c61b1f9dd3acd6c6ff718928dcd0c2a44f4daa069dceccbc62daf803ffd9"),
         variant("filter/APFBFilter.nitro", "64fe5865f51c630d0b81c838c04a9236498753ad140cc6220f7792ba3b069069"),
         variant("filter/ResoMon.nitro", "0c18ded26998900c5570d3558287bec73a0590d6860840a958556c0651e416ba"),
@@ -172,6 +184,32 @@ final class GridSourceProfile {
     );
 
     private static final Map<String, Rule> EMBEDDED = Map.ofEntries(
+        Map.entry("55b16a81618e82f36e7e27ac5acfd9c37d49919c773d8b44e9edd54aa8c9a43c", Rule.TRANSFORM),
+        Map.entry("3a29b05f1a294f6bc5c240f266c00f54c9985bbce383560de17141bae82a9514", Rule.TRANSFORM),
+        Map.entry("742a5a6d9f8082d0f94c2cf3fc3d27c681f884d1d5ef7dc9751593f52ca10b6a", Rule.TRANSFORM),
+        Map.entry("2ec9bfaa7febab5992ad75f82f7a7ccdfba1e965e7c03de11d29b5ba8a40f691", Rule.TRANSFORM),
+        Map.entry("934e8815ef0fb443ee1b153fa47b7ae5a1385d336849bbd561e60fc00749ea05", Rule.TRANSFORM),
+        Map.entry("8f14db4e415396a89c9cd11df78cc0f25e1612edd2e1ad003152beaf4d0ce71e", Rule.TRANSFORM),
+        Map.entry("686a90e7448cc3874c08efb5e0de3d5e15bbd0f91c572a06ff16d3ae4783a5c8", Rule.TRANSFORM),
+        Map.entry("e02a2f7d5ee643a19f93fb57283aa5e832a875207a1befdc07267ff2ae9cb7af", Rule.TRANSFORM),
+        Map.entry("bdf6ff87ac6891427e3fcce296c5371c684acf385c3579562a58d0fbd9bdbfb8", Rule.TRANSFORM),
+        Map.entry("e8b5a59eb9bf4ea2d24cdeb81f0a9d612c362f7d81808b9db8500c67897ca290", Rule.TRANSFORM),
+        Map.entry("5432e4434357b828b36ef9ac22af894e401a4adfb803b0a8b48bfaa36e13724d", Rule.TRANSFORM),
+        Map.entry("2bbf8668e57d1bdb22230fa0d11e24a0454247b644a26bd6aec7b369c4ed78ee", Rule.TRANSFORM),
+        Map.entry("331a1ec743d022729f4ca05350e807a79974a1d2f3dbdbb52734b9eae51685bc", Rule.TRANSFORM),
+        Map.entry("25bbb91cbb23ac68ebea30c085418a0e25579fe57b6c8fca885f84fd3e45fb7c", Rule.TRANSFORM),
+        Map.entry("f43bf774af37b1ae304fd47e6a3a26246d2f9a43275073c1e14fc1c244cb0356", Rule.TRANSFORM),
+        Map.entry("f5f2e4c7a6f8da735e56d4f779979c032921b41be900df1b607198d8523e77b7", Rule.TRANSFORM),
+        Map.entry("afe97a9431a64e1543d8f5ca3dc276403ec846021751c3897376367d47e04b13", Rule.TRANSFORM),
+        Map.entry("c3697aaefb7625e7242fd44b620e9dc1be0a223104cea0c6fc1ab75cee1fc3f4", Rule.TRANSFORM),
+        Map.entry("39e3874b4701b08ad5ab58b526e53cfeeb34742b6b0a2b0007eb4480df334c0b", Rule.TRANSFORM),
+        Map.entry("6160c63391de13356cd1ffc2635bb11543db15a40e50c4bbc193f3fb3bd957fd", Rule.TRANSFORM),
+        Map.entry("7cbd7fe56b0f44381bb2760d60809df580764fe7032b4068e2129984a9dbb26f", Rule.TRANSFORM),
+        Map.entry("9f1f53f9bc566b563cbd7de6d22ce154989919ef03d92b7c46c4af7c5aa21643", Rule.TRANSFORM),
+        Map.entry("6311a9eb99eec0ba4b60c5001ec713468374ead9a6360619a8eb1a2f5b340d02", Rule.TRANSFORM),
+        Map.entry("d7a8f1fcccc1994fce44c38b49a457bf59485fad99d3fb907e58ac6771343226", Rule.TRANSFORM),
+        Map.entry("c4bbbc9807c30e560253cdafe064fe498dac9db5c682f88312e81512d0f1086a", Rule.TRANSFORM),
+        Map.entry("2e6291a039cc3ce73d9b4b6eaeaf2553139d3d4e73cd844387f2d813d0749dfe", Rule.TRANSFORM),
         Map.entry("af0981d9af8c598ca7dbac1f15c6bab6c1e4eca8db3c995690158af8f87ad291", Rule.TRANSFORM),
         Map.entry("62ef21742eddd54edc55bae11be2b0ab441727e11dbaab6d08903ce21b7307a8", Rule.TRANSFORM),
         Map.entry("74bd8ba902f315df25ea547c5ecfb75bf5876349f1c076d7d72046de02b90767", Rule.TRANSFORM),
@@ -209,6 +247,45 @@ final class GridSourceProfile {
 
     // Exact stock binary inputs with a proved pointwise or host-control contract.
     private static final Set<String> CARRIER_EMBEDDED = Set.of(
+        "e3ce81e9ec65c5540a05f55e06c6fcc2a7a4f985545cfa0d60936a17dee2a739",
+        "6848eb7a70891acd3652c507c3277d0457e8514ac7db1d6166653721856340ab",
+        "e90c47ed81714d7814e4dcbe27a6d1cea8afc725298ac438ed5450927d18bf7c",
+        "9c9bde8a33e7ab3bd6916bc17d2915cd70f08e0b99561966d3aa2765a489c843",
+        "5a9f014b8990474f92a5c7b5f7d408c35792593c8c83cf620b644e46456ae065",
+        "b73a3ea7f9179c2e1141d8fb502aad7b488ad90da4f0ba33865ce1ced940af12",
+        "c2200bb4e7b3e0e5cc8919bf8c930328357b3c146cf74e25f3ad8dd5bed1bbc6",
+        "bc2760712f56597477c1a72bda3fef8fe40322551f238ddc1b8dab06eb04e4f1",
+        "6d6877339cde72312e12c0e454721bf176b16d1a108db0ac533d4d6263a6449a",
+        "07d111ef17cf2c686f68ff1c5f7f8c77a7959bc49f6317f3ace99cf197cde5dd",
+        "9210d888716945c65e95b8e4da089a458501ed160b363ce6fd5fee0de1b1a12d",
+        "78a2e0883d0b4a602db682b374cbc6dfde7a8a40f3325be9593e8f2226b0bc2a",
+        "6b87bef4274b6cac215959eac89192fcdc1df01d84627489044ffae2657b957d",
+        "b8b7653133382ff74175dbed59dcee48950faefa420d67f2782fb0282981dec0",
+        "b6312a9646dcd81dd05287daa40327220acb66469421551a3021651cc50ceb19",
+        "58b175b9961631c7af252beb323940da46212d52ece2251b7e78be4874831510",
+        "6dc52a0fcf5cb8bfe4b893e14cda85ade1a22e26741d33ee8818f1b18f334d02",
+        "94abf94f37e83beca25c541c45dfb9ca22609935ddacb5671405724a8c652aa0",
+        "d71b15a4860a4840473caa340face82e84d1a79e097674046a5d80c2a62c61c1",
+        "4917a0256a44e59fd515c001868ea41b48d29487418891abd15de60a94dcc7d1",
+        "cdd907ade36be5193bbece8cf0e9d934d7d96def93cf1e497d09f7ebe10417da",
+        "1c438234bd0c520b8a200fbc182c7702619d46fa75fed7068c8b6aa1acf6b206",
+        "5f869eb6ef91c13035b363a058d9dceb3041a46c61afb11e6a294765809d1373",
+        "b5a3f403606185cd5b870872777b3715c3e1cf7b4da4e9b7a48594df65dc67c2",
+        "76e7fd94952b223cc59db035dd69c23cc1a0c15ed78cdb3827c297eaa7ccd072",
+        "2eb58f72b126a1d2f1402ea61fb95dfce47a7231191b5d3a376d8b78fe4be24a",
+        "12b94d81ed0c91b7256f4f0d30908230179c81122c087b8a7e7a475eda2f6103",
+        "c32e0a47c0521a84d143b86de42dd3bcf9adc0090c23102c376d4cfbcdb76d26",
+        "6184bef34c774987d1d0f312727f986bc454167d435ef2b7b9ed212b6432bd2d",
+        "da551508dda767adb2aa24113b2e348ece6f0f79c8592707135f9c0ebc4a344e",
+        "889262ba2a9b64a195abc997fed573ba869798a9328f2f612f34c1825d44e028",
+        "13fd793234437810a183493e728ff34c86f5501310b887b02863085625f0d248",
+        "86373f5892886f1742b6ffd00a353abb72c5ad2ebeab0ffb72d7982822ce4e98",
+        "f16c2cbd029549c150cbe70c5f705805ed287c61083d4daf9612cc922ad777a5",
+        "3439e9abc436ed505985fd0ea38fc887785c547355859301d5d8323b26678965",
+        "4a5c64d675de00ee419252f64750dd0168765b75d70e510fd346ebcd91bc90a0",
+        "17a628eab679d02b0b9a667d9c91e4e47e991a54879d1cea00cf40f455cbefc2",
+        "c1b73f289623c0efc5446f010b5ef155c698e086f61d6eb4a73cda022d12e2da",
+        "3272b68a77307766e7feec6d43eac0b2362a0b63268de529a795b6470f8da5f5",
         "7f5790a2e91023ed7a671ae9c1f4180e82511e01e4a219ee258189d97737ac86",
         "9a2b4681a57da027e0cf3c556b44086fa5f9410c6857b4bbde9c2befad6c0612",
         "688f2c0ee37f16c7f208f4a9a4a029edb260bebffd216a9d4d5da4444febcd50",
@@ -343,7 +420,7 @@ final class GridSourceProfile {
             && classify(original) == Rule.TRANSFORM;
     }
 
-    private static String digest(byte[] payload) {
+    static String digest(byte[] payload) {
         if (payload == null) return null;
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(payload));

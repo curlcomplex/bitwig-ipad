@@ -14,6 +14,7 @@ DEVICE_CLASSES = 'com/bitwig/flt/document/core/master/device/'
 PATCHED = {
     'AiR': DEVICE_CLASSES + 'AiR.class',
     'utt': DEVICE_CLASSES + 'utt.class',
+    'nWI': DEVICE_CLASSES + 'nWI.class',
     'TLG': 'TLG.class',
     'aKf': 'aKf.class',
 }
@@ -46,7 +47,7 @@ def prepare(java_dir, destination, *, patchbay=False):
         with zipfile.ZipFile(original) as jar:
             for name, entry in PATCHED.items():
                 (work / f'{name}.stock').write_bytes(jar.read(entry))
-        for patch in ('PatchGridSourceSelection', 'PatchGridPolicy', 'PatchGridInspector'):
+        for patch in ('PatchGridSourceSelection', 'PatchGridPolicy', 'PatchGridGraph', 'PatchGridInspector'):
             subprocess.run([java, '-cp', f'{tools}:{classpath}', patch, str(work)], check=True)
 
         if patchbay:

@@ -9,7 +9,7 @@ final class GridInspectorRow {
     private static final String HOST = "1×";
 
     static void append(aKf inspector, sgf selection, dXL rows) {
-        if (!(selection instanceof utt device) || !GridSourceSelection.isAdmitted(device)) return;
+        if (!(selection instanceof utt device) || !GridGraphProfile.isFactory(device)) return;
         var field = (dfB)AiR.sCA.beI(PatchGridPolicy.PROPERTY);
         var control = dDu.beI(new Choice(device, field), new Object[]{STOCK, HOST});
         control.Gef(inspector.JrT());
@@ -29,11 +29,7 @@ final class GridInspectorRow {
 
         @Override
         public Object getValue() {
-            return field.Bqk(device) ? HOST : STOCK;
-        }
-
-        private static String label(Object value) {
-            return Boolean.TRUE.equals(value) ? HOST : STOCK;
+            return isSettable() && field.Bqk(device) ? HOST : STOCK;
         }
 
         @Override
@@ -56,18 +52,29 @@ final class GridInspectorRow {
         @Override
         public void addListener(NVD listener) {
             if (listeners.containsKey(listener)) return;
-            NVD relay = event -> {
-                MNh change = (MNh)event;
-                listener.eventOccurred(new MNh(this,label(change.Gef()),label(change.MgQ())));
+            NVD relay = new NVD() {
+                private Object previous = getValue();
+
+                @Override
+                public void eventOccurred(Object event) {
+                    Object current = getValue();
+                    Object old = previous;
+                    previous = current;
+                    listener.eventOccurred(new MNh(Choice.this,current,old));
+                }
             };
-            field.beI(device, relay);
-            listeners.put(listener, relay);
+            field.beI(device,relay);
+            GridSourceSelection.qualificationObservers(device,true).addListener(relay);
+            listeners.put(listener,relay);
         }
 
         @Override
         public void removeListener(NVD listener) {
             NVD relay = listeners.remove(listener);
-            if (relay != null) field.Gef(device, relay);
+            if (relay != null) {
+                field.Gef(device,relay);
+                GridSourceSelection.qualificationObservers(device,false).removeListener(relay);
+            }
         }
     }
 }

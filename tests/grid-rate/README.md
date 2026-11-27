@@ -10,7 +10,7 @@ classpath="$jar:$BITWIG_APP/Contents/Java/libs.jar"
 mkdir -p "$GRID_SCRATCH"/{tools,home,policy}
 javac --release 25 -cp "$classpath" -d "$GRID_SCRATCH/tools" \
   probe/grid-rate/*.java tests/grid-rate/*.java
-for name in AiR utt; do
+for name in AiR utt nWI; do
   unzip -p "$jar" "com/bitwig/flt/document/core/master/device/$name.class" \
     > "$GRID_SCRATCH/policy/$name.stock"
 done
@@ -19,6 +19,7 @@ for name in TLG aKf; do
 done
 java -cp "$GRID_SCRATCH/tools:$classpath" PatchGridSourceSelection "$GRID_SCRATCH/policy"
 java -cp "$GRID_SCRATCH/tools:$classpath" PatchGridInspector "$GRID_SCRATCH/policy"
+java -cp "$GRID_SCRATCH/tools:$classpath" PatchGridGraph "$GRID_SCRATCH/policy"
 java -cp "$GRID_SCRATCH/tools:$classpath" PatchGridPolicy "$GRID_SCRATCH/policy"
 java -Xverify:all -DinstallationRoot="$BITWIG_APP" -Duser.home="$GRID_SCRATCH/home" \
   -cp "$GRID_SCRATCH/tools:$classpath" VerifyGridPolicy stock-write "$GRID_SCRATCH/policy"
@@ -33,9 +34,9 @@ java -Xverify:all -DinstallationRoot="$BITWIG_APP" -Duser.home="$GRID_SCRATCH/ho
 
 `VerifyGridSourceProfile` takes the locally resolved stock embedded Clock Quantize binary as its single argument. Include `$GRID_SCRATCH/policy/classes` before the test classes and stock JARs on its classpath, and set `-DinstallationRoot` to the original app bundle. It checks original source-object kind, archive path and digest, rejection of changed source, and stock pass-through with no admitted graph.
 
-To prepare the same class overlay as a single local JAR, run `python3 probe/grid-rate/prepare.py "$BITWIG_APP" "$GRID_SCRATCH/overlay.jar"` with the Java 25 toolchain on `PATH`. The output contains four exact locally patched class definitions and the shared runtime helpers. It is a local build artifact. The normal launcher still uses its original archive, and the prepared code has no graph admission caller.
+To prepare the same class overlay as a single local JAR, run `python3 probe/grid-rate/prepare.py "$BITWIG_APP" "$GRID_SCRATCH/overlay.jar"` with the Java 25 toolchain on `PATH`. The output contains five exact locally patched class definitions and the shared runtime helpers. It is a local build artifact. The normal launcher still uses its original archive.
 
-For a desktop Patchbay file hook, run `python3 probe/grid-rate/prepare.py --patchbay "$BITWIG_APP" "$GRID_SCRATCH/patchbay"`. This writes the four replacements as individual class files, a replacement map, and a helper JAR containing only compatibility classes. The upstream launcher from Patchbay commit `4756a2178276068d488fcde3725eaa6c0ad57e5e` loaded the four replacements and helper classes in the original system class loader during the headless codec check. A desktop GUI session still needs validation. Use an isolated original 6.1.7 app.
+For a desktop Patchbay file hook, run `python3 probe/grid-rate/prepare.py --patchbay "$BITWIG_APP" "$GRID_SCRATCH/patchbay"`. This writes the five replacements as individual class files, a replacement map, and a helper JAR containing only compatibility classes. The upstream launcher from Patchbay commit `4756a2178276068d488fcde3725eaa6c0ad57e5e` loaded the four replacements and helper classes in the original system class loader during the headless codec check. A desktop GUI session still needs validation. Use an isolated original 6.1.7 app.
 
 ```sh
 BITWIG_CLASS_HOOK_MODE=file \
