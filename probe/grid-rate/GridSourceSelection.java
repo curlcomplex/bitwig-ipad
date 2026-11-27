@@ -59,9 +59,22 @@ public final class GridSourceSelection {
         }
     }
 
+    private static boolean isGridAtom(utt owner, TLG atom) {
+        if (atom.BBg(ZFS.class) instanceof ZFS module) {
+            if (owner.Qnz() == null) return false;
+            for (Object item : owner.Qnz().dvk()) {
+                if (item == module) return true;
+            }
+            return false;
+        }
+        try (Stream<?> outer = owner.vUU()) {
+            return outer.anyMatch(item -> item == atom);
+        }
+    }
+
     static vP2 choose(TLG atom, vP2 source) {
         Object ancestor = atom.BBg(utt.class);
-        if (!(ancestor instanceof utt owner) || !isAdmitted(owner)) return source;
+        if (!(ancestor instanceof utt owner) || !isAdmitted(owner) || !isGridAtom(owner, atom)) return source;
         try {
             if (!(boolean)Policy.oneX.invoke(owner)) return source;
         } catch (ReflectiveOperationException error) {

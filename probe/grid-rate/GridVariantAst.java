@@ -67,14 +67,22 @@ final class GridVariantAst {
             case "grid_phasor", "grid_phasor_pm", "grid_phase_counter", "grid_lfo_phasor" ->
                 phaseCarrier(declarations,name(root));
             case "trigger_merge" -> triggerMerge(declarations);
+            case "audioToTrigger" -> audioToTrigger(declarations);
             case "grid_delay", "grid_allpass_delay" -> directDelay(declarations, name(root));
             case "grid_mod_delay" -> modDelay(declarations);
             case "DelayTime" -> modDelayTime(declarations);
+            case "accent_stepper" -> stepper(declarations,true,"out_normals","out_accents");
+            case "gate_stepper" -> stepper(declarations,true,"out");
+            case "pitch_stepper" -> stepper(declarations,false,"pitchOut");
+            case "grid_stepper" -> stepper(declarations,false,"valueOut");
             case "grid_clock_divide" -> clockDivide(declarations);
             case "ClockQuantize", "GateLength", "GateRepeat" -> clockGate(declarations,name(root));
             case "GridADSR", "AD", "AR" -> adsr(declarations);
             case "AudioOut" -> audioOut(declarations);
+            case "post" -> postMean(declarations);
             case "grid_lifetimer" -> voiceLifeTimer(declarations);
+            case "grid_gain_expression" -> noteExpression(root,declarations,"gain");
+            case "grid_pan_expression" -> noteExpression(root,declarations,"pan");
             case "BWLPF", "BWHPF", "BWAPF" -> butterworth(declarations);
             case "LR2", "LR3" -> crossover(declarations,name(root));
             case "tanhClip", "drunk_fold", "e_clip", "gentle_fold", "hardclip2", "s_clip", "wavefolder",
@@ -414,6 +422,87 @@ final class GridVariantAst {
             "out[1] = 0; out[2] = 0; out[3] = 0;");
     }
 
+    private static void audioToTrigger(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Object sum = find(collect(process,"VariableDeclaration"),"VariableDeclaration","in_sum");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        if (!print(initializer.get(sum)).equals("in.+"))
+            throw new IllegalStateException("Unexpected stock audio trigger sum");
+
+        // Curves wires this input to trigger_merge. Its 1× output is a
+        // binary stereo impulse in the first pair followed by three zero pairs.
+        Object example = find(fragment("process { f32 in_sum = in[0] + in[1]; }"),
+            "ProcessBlockDeclaration",null);
+        Object replacement = find(collect(example,"VariableDeclaration"),"VariableDeclaration","in_sum");
+        initializer.set(sum,initializer.get(replacement));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void noteExpression(Object component,List<Object> declarations,String kind)
+        throws ReflectiveOperationException {
+        Field target = field(type("CallExpression"),"sCA");
+        Field args = field(type("CallExpression"),"MgQ");
+        Field left = field(type("BinaryExpression"),"Gef");
+        Field right = field(type("BinaryExpression"),"sCA");
+        List<Object> setup = new ArrayList<>();
+        for (Object call : collect(component,"CallExpression")) {
+            if (print(target.get(call)).equals(kind + "Smooth.setRate")) setup.add(call);
+        }
+        Object call = find(setup,"CallExpression",null);
+        List<Object> arguments = (List<Object>)args.get(call);
+        Object smoothingClock = arguments.getFirst();
+        require(smoothingClock,"MulExpression");
+        if (!print(left.get(smoothingClock)).equals("EC.samplerate") || literal(right.get(smoothingClock)) != 4)
+            throw new IllegalStateException("Unexpected note expression smoothing clock");
+        arguments.set(0,left.get(smoothingClock));
+
+        // The decoder stores this handler alongside the component processing
+        // declarations. The pretty-printer omits it.
+        Field out = field(type("AssignStatement"),"Gef");
+        Field value = field(type("AssignStatement"),"sCA");
+        int ramps = 0;
+        for (Object assign : collect(component,"AssignStatement")) {
+            if (!print(out.get(assign)).equals(kind + "Ramptime")) continue;
+            Object duration = value.get(assign);
+            if (!duration.getClass().getSimpleName().equals("MulExpression")) continue;
+            if (!print(left.get(duration)).equals("in.ramptime") || literal(right.get(duration)) != 4)
+                throw new IllegalStateException("Unexpected note expression event duration");
+            value.set(assign,left.get(duration));
+            ramps++;
+        }
+        if (ramps != 1) throw new IllegalStateException("Expected one stock expression ramp writer");
+
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Object loop = find(collect(process,"ForStatement"),"ForStatement",null);
+        Object guard = field(type("ForStatement"),"MgQ").get(loop);
+        if (!print(guard).equals("i < 4") || literal(right.get(guard)) != 4)
+            throw new IllegalStateException("Unexpected note expression time loop");
+        right.set(guard,newInteger(1));
+        appendPairRepeat(process,"out_" + kind);
+    }
+
+    private static void postMean(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> assignments = collect(process,"AssignStatement");
+        Field destination = field(type("AssignStatement"),"Gef");
+        Field value = field(type("AssignStatement"),"sCA");
+        String target = assignments.size() == 2 ? "outMod" : "out";
+        Object mean = assignments.getLast();
+        String source = target.equals("outMod") ? "out" : "in";
+        String reduction = print(value.get(mean));
+        if (assignments.size() > 2 || !print(destination.get(mean)).equals(target) ||
+            !(reduction.equals(source + ".+ / 8") ||
+              (target.equals("out") && reduction.equals("in.+ * 0.125"))))
+            throw new IllegalStateException("Unexpected stock post mean");
+
+        // The carrier contains four temporal stereo pairs. At 1× the first pair
+        // is the host sample, including both channels in the scalar mean.
+        Object example = find(fragment("process { " + target + " = (" + source +
+            "[0] + " + source + "[1]) * 0.5; }"),"ProcessBlockDeclaration",null);
+        Object replacement = find(collect(example,"AssignStatement"),"AssignStatement",null);
+        value.set(mean,value.get(replacement));
+    }
+
     private static void voiceLifeTimer(List<Object> declarations) throws ReflectiveOperationException {
         Object process = find(declarations,"ProcessBlockDeclaration",null);
         List<Object> locals = collect(process,"VariableDeclaration");
@@ -462,6 +551,36 @@ final class GridVariantAst {
         initializer.set(clock,newInteger(1));
         if (component.equals("LR2")) appendPairRepeat(process,"outLow","outHigh");
         else appendPairRepeat(process,"outLow","outMid","outHigh");
+    }
+
+    private static void stepper(List<Object> declarations,boolean hasTrigger,String... outputs)
+        throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> loops = collect(process,"ForStatement");
+        Field guard = field(type("ForStatement"),"MgQ");
+        Field right = field(type("BinaryExpression"),"sCA");
+        if (loops.size() != (hasTrigger ? 2 : 1))
+            throw new IllegalStateException("Unexpected stock stepper loop count");
+        for (int i = 0; i < loops.size(); i++) {
+            Object bound = guard.get(loops.get(i));
+            String condition = print(bound);
+            int limit = hasTrigger && i == 0 ? 4 : 8;
+            if (!condition.equals("i < " + limit) || literal(right.get(bound)) != limit)
+                throw new IllegalStateException("Unexpected stock stepper carrier loop");
+            right.set(bound,newInteger(limit == 4 ? 1 : 2));
+        }
+
+        // The trigger loop advances one stereo state. The other loop gathers
+        // sequence data independently for the left and right lanes.
+        var repeat = new StringBuilder("process { ");
+        for (String output : outputs) {
+            for (int lane = 2; lane < 8; lane++)
+                repeat.append(output).append('[').append(lane).append("] = ")
+                    .append(output).append('[').append(lane % 2).append("]; ");
+        }
+        Object replacement = find(fragment(repeat.append('}').toString()),"ProcessBlockDeclaration",null);
+        Field body = field(type("ProcessBlockDeclaration"),"Gef");
+        blockList(body.get(process),"Gef").addAll(blockList(body.get(replacement),"Gef"));
     }
 
     private static void appendPairRepeat(Object process,String... outputs) throws ReflectiveOperationException {

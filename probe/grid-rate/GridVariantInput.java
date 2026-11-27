@@ -4,7 +4,8 @@ import com.bitwig.nitro.vP2;
 
 /** One immutable, already-qualified source choice for the stock compiler. */
 final class GridVariantInput extends vP2 {
-    private static final String CACHE_SUFFIX = ":bitwigipad-grid-1x-v1";
+    // Advance the suffix when a rate rule changes generated DSP semantics.
+    private static final String CACHE_SUFFIX = ":bitwigipad-grid-1x-v2";
     private final vP2 original;
     private final boolean passthrough;
 

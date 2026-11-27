@@ -35,7 +35,7 @@ java -Xverify:all -DinstallationRoot="$BITWIG_APP" -Duser.home="$GRID_SCRATCH/ho
 
 To prepare the same class overlay as a single local JAR, run `python3 probe/grid-rate/prepare.py "$BITWIG_APP" "$GRID_SCRATCH/overlay.jar"` with the Java 25 toolchain on `PATH`. The output contains four exact locally patched class definitions and the shared runtime helpers. It is a local build artifact. The normal launcher still uses its original archive, and the prepared code has no graph admission caller.
 
-For a desktop Patchbay file hook, run `python3 probe/grid-rate/prepare.py --patchbay "$BITWIG_APP" "$GRID_SCRATCH/patchbay"`. This writes the four replacements as individual class files, a replacement map, and a helper JAR containing only compatibility classes. Use the upstream launcher with an isolated original 6.1.7 app.
+For a desktop Patchbay file hook, run `python3 probe/grid-rate/prepare.py --patchbay "$BITWIG_APP" "$GRID_SCRATCH/patchbay"`. This writes the four replacements as individual class files, a replacement map, and a helper JAR containing only compatibility classes. The upstream launcher from Patchbay commit `4756a2178276068d488fcde3725eaa6c0ad57e5e` loaded the four replacements and helper classes in the original system class loader during the headless codec check. A desktop GUI session still needs validation. Use an isolated original 6.1.7 app.
 
 ```sh
 BITWIG_CLASS_HOOK_MODE=file \

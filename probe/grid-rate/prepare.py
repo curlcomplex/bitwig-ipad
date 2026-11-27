@@ -2,6 +2,7 @@
 """Prepare an exact locally installed Grid compatibility class overlay."""
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,26 +22,32 @@ PATCHED = {
 def prepare(java_dir, destination, *, patchbay=False):
     original = java_dir / 'bitwig.jar'
     libraries = java_dir / 'libs.jar'
+    digest = hashlib.sha256()
     with original.open('rb') as source:
-        if hashlib.file_digest(source, 'sha256').hexdigest() != BITWIG_JAR:
-            raise ValueError('Expected the original Bitwig Studio 6.1.7 Java archive')
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    if digest.hexdigest() != BITWIG_JAR:
+        raise ValueError('Expected the original Bitwig Studio 6.1.7 Java archive')
     if destination.exists() or destination.is_relative_to(java_dir.parent):
         raise ValueError('Choose a new staging path outside the Bitwig installation')
     if patchbay and any(character in str(destination) for character in '\t\r\n'):
         raise ValueError('Patchbay staging paths cannot contain tabs or newlines')
     destination.parent.mkdir(parents=True, exist_ok=True)
     classpath = f'{original}:{libraries}'
+    jdk = os.environ.get('BITWIG_JDK_HOME') or os.environ.get('JAVA_HOME')
+    java = str(Path(jdk).expanduser() / 'bin' / 'java') if jdk else 'java'
+    javac = str(Path(jdk).expanduser() / 'bin' / 'javac') if jdk else 'javac'
     with tempfile.TemporaryDirectory(dir=destination.parent, prefix='.grid-rate-') as scratch:
         work = Path(scratch)
         tools = work / 'tools'
         tools.mkdir()
-        subprocess.run(['javac', '--release', '25', '-cp', classpath, '-d', str(tools),
+        subprocess.run([javac, '--release', '25', '-cp', classpath, '-d', str(tools),
                         *map(str, sorted(SOURCE.glob('*.java')))], check=True)
         with zipfile.ZipFile(original) as jar:
             for name, entry in PATCHED.items():
                 (work / f'{name}.stock').write_bytes(jar.read(entry))
         for patch in ('PatchGridSourceSelection', 'PatchGridPolicy', 'PatchGridInspector'):
-            subprocess.run(['java', '-cp', f'{tools}:{classpath}', patch, str(work)], check=True)
+            subprocess.run([java, '-cp', f'{tools}:{classpath}', patch, str(work)], check=True)
 
         if patchbay:
             bundle = work / 'patchbay'
