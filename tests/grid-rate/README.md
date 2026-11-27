@@ -14,6 +14,11 @@ for name in AiR utt; do
   unzip -p "$jar" "com/bitwig/flt/document/core/master/device/$name.class" \
     > "$GRID_SCRATCH/policy/$name.stock"
 done
+for name in TLG aKf; do
+  unzip -p "$jar" "$name.class" > "$GRID_SCRATCH/policy/$name.stock"
+done
+java -cp "$GRID_SCRATCH/tools:$classpath" PatchGridSourceSelection "$GRID_SCRATCH/policy"
+java -cp "$GRID_SCRATCH/tools:$classpath" PatchGridInspector "$GRID_SCRATCH/policy"
 java -cp "$GRID_SCRATCH/tools:$classpath" PatchGridPolicy "$GRID_SCRATCH/policy"
 java -Xverify:all -DinstallationRoot="$BITWIG_APP" -Duser.home="$GRID_SCRATCH/home" \
   -cp "$GRID_SCRATCH/tools:$classpath" VerifyGridPolicy stock-write "$GRID_SCRATCH/policy"
@@ -25,3 +30,5 @@ java -Xverify:all -DinstallationRoot="$BITWIG_APP" -Duser.home="$GRID_SCRATCH/ho
 ```
 
 `GridCacheProof` takes the scratch directory followed by local `.nitrobin` input paths. For each input, the original stock compiler runs a 4×, 1×, 4× sequence in one process. The test requires distinct variant cache identity and byte-identical original LLVM IR at the final 4× step. Configure `java.library.path` to locate the original Bitwig JNI library for this test. On macOS, a scratch link named `libbitwig-jni.dylib` can point to the installed `libbitwig-jni.jnilib`.
+
+`VerifyGridSourceProfile` takes the locally resolved stock embedded Clock Quantize binary as its single argument. Include `$GRID_SCRATCH/policy/classes` before the test classes and stock JARs on its classpath, and set `-DinstallationRoot` to the original app bundle. It checks original source-object kind, archive path and digest, rejection of changed source, and stock pass-through with no admitted graph.

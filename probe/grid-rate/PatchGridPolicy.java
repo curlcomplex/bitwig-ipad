@@ -152,6 +152,8 @@ final class PatchGridPolicy implements Opcodes {
         method.visitVarInsn(ALOAD,0);
         method.visitVarInsn(ILOAD,1);
         method.visitFieldInsn(PUTFIELD,UTT,FIELD,"Z");
+        method.visitVarInsn(ALOAD,0);
+        method.visitMethodInsn(INVOKESTATIC,"GridSourceSelection","policyChanged","(L"+UTT+";)V",false);
         method.visitLabel(done);
         method.visitFrame(F_SAME,0,null,0,null);
         method.visitInsn(RETURN);
