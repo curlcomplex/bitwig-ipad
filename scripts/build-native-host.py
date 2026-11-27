@@ -62,6 +62,8 @@ simulator = selected_simulator(parser, args.simulator) if args.run else None
 identity = build_identity(parser, args.device, args.embedded_engine)
 jni_headers = jni_include_paths(parser)
 SOURCE = bitwig.contents
+managed_plugin_refresh = args.independent_plugins and bitwig.version == '6.1.7' and (
+    sha256(SOURCE/'Java'/'bitwig.jar') == '6024752847797eb41e6fbc91e081211937931cc452a695ab78226321cefdac8d')
 build_name = 'native-host-tunnel' if args.embedded_tunnel else 'native-host-device' if args.device else 'native-host'
 if args.embedded_tunnel and not args.embedded_engine: build_name += '-no-engine'
 if args.embedded_engine and not args.embedded_tunnel: build_name += '-engine'
@@ -109,9 +111,6 @@ compat_sources = [ROOT/'native/compat/AppKit.m', ROOT/'native/compat/DesktopServ
 if args.independent_plugins or args.surge_editor_clap_include or args.ott_vst3 or args.nam_vst3 or fabfilter: compat_sources.append(ROOT/'native/compat/surge/EditorSurface.m')
 compat_defines = ['-DBW_VSTGUI_EDITOR=1'] if args.ott_vst3 or args.independent_plugins else []
 if args.surge_editor_clap_include: compat_defines.append('-DBW_JUCE_EDITOR=1')
-if args.independent_plugins:
-    compat_sources.append(ROOT/'native/compat/PluginPackage.m')
-    compat_defines.append('-DBW_INDEPENDENT_PLUGIN_UI=1')
 if fabfilter or args.independent_plugins:
     compat_sources.extend(ROOT/'native/compat/fabfilter'/name for name in ('View.m', 'Menu.m'))
     compat_defines.append('-DBW_FABFILTER_EDITOR=1')
@@ -244,6 +243,14 @@ if args.embedded_engine:
         helper_path.parent.mkdir(parents=True,exist_ok=True)
         if not helper_path.is_symlink(): helper_path.symlink_to('../../../../../../Frameworks/BitwigPluginHost.bundle')
 for name in ['bitwig.jar','libs.jar']: shutil.copy2(SOURCE/'Java'/name,APP/name)
+if managed_plugin_refresh:
+    jdk_bin = Path(jni_headers[0]).parent/'bin'
+    with tempfile.TemporaryDirectory(dir=BUILD) as scratch:
+        classes = Path(scratch)
+        classpath = ':'.join(str(APP/name) for name in ('bitwig.jar', 'libs.jar'))
+        run(jdk_bin/'javac', '--release', '25', '-cp', classpath, '-d', classes,
+            ROOT/'probe/plugin-files/ManagedPluginRefresh.java')
+        run(jdk_bin/'jar', '--create', '--file', APP/'ManagedPluginRefresh.jar', '-C', classes, '.')
 if args.grid_rate_overlay:
     with tempfile.TemporaryDirectory(dir=BUILD) as scratch:
         grid_overlay = Path(scratch) / 'GridRate.jar'
@@ -313,6 +320,9 @@ if args.device:
     resources += [{'path':str(BUILD/'Assets.xcassets'),'buildPhase':'resources'}]
     resources += [{'path':str(APP/name),'buildPhase':'resources'} for name in ['bitwig.jar','libs.jar','native-imports.json']]
     java_defines = ['$(inherited)', 'FULL_BITWIG_HOST=1']
+    if managed_plugin_refresh:
+        resources.append({'path':str(APP/'ManagedPluginRefresh.jar'),'buildPhase':'resources'})
+        java_defines.append('BW_MANAGED_PLUGIN_REFRESH=1')
     if args.grid_rate_overlay:
         resources.append({'path':str(APP/'GridRate.jar'),'buildPhase':'resources'})
         java_defines.append('GRID_RATE_OVERLAY=1')
@@ -359,6 +369,9 @@ PYSIGN'''
             'settings':{'base':{**common,'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier']+'.engine',
                 'INFOPLIST_FILE':str(BUILD/'Engine-Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Engine.entitlements'),'CLANG_ENABLE_OBJC_ARC':'YES',
                 'APPLICATION_EXTENSION_API_ONLY':'YES','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../../Frameworks'}}}
+    if args.independent_plugins:
+        host['sources'].append({'path':str(ROOT/'native/compat/PluginPackage.m')})
+        host['settings']['base']['GCC_PREPROCESSOR_DEFINITIONS'].append('BW_INDEPENDENT_PLUGIN_FILES=1')
     if plugin_metadata:
         host['sources'].append({'path':str(ROOT/'native/NativePluginMetadataCoordinator.swift')})
         host['dependencies'].append({'target':'BitwigPluginMetadata','embed':True})

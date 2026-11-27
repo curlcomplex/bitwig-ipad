@@ -1010,12 +1010,6 @@ static const NSUInteger BWWindowFullScreenAuxiliary = 1ul << 8;
     [super layoutSubviews];
     id<BWSceneWindow> desktop=self.desktopWindow;
     [desktop bwSyncSceneFrame];
-#if BW_INDEPENDENT_PLUGIN_UI
-    if (self.windowScene && [desktop bwFollowsScene]) {
-        extern void BWInstallPluginButton(UIView *view);
-        BWInstallPluginButton(self);
-    }
-#endif
 }
 - (BOOL)respondsToSelector:(SEL)selector { return [super respondsToSelector:selector]||[self.desktopWindow respondsToSelector:selector]; }
 - (BOOL)canBecomeKeyWindow { return self.desktopWindow?((BOOL(*)(id,SEL))objc_msgSend)(self.desktopWindow,@selector(canBecomeKeyWindow)):[super canBecomeKeyWindow]; }
@@ -1986,14 +1980,6 @@ BW_TRACE_MISSING_SELECTOR
 }
 @end
 void BWUIKitBuildMenu(id<UIMenuBuilder> builder) {
-#if BW_INDEPENDENT_PLUGIN_UI
-    extern void BWShowPreparedPlugins(void);
-    UIAction *plugins=[UIAction actionWithTitle:@"Manage Plug-ins…" image:nil identifier:nil handler:^(UIAction *action) {
-        BWShowPreparedPlugins();
-    }];
-    UIMenu *menuPlugins=[UIMenu menuWithTitle:@"Plug-ins" children:@[plugins]];
-    [builder insertChildMenu:menuPlugins atEndOfMenuForIdentifier:UIMenuRoot];
-#endif
     NSMenu *menu=[NSApp mainMenu];if(menu)[builder insertChildMenu:[menu uiMenu] atEndOfMenuForIdentifier:UIMenuRoot];
 }
 

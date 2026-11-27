@@ -58,15 +58,15 @@ static bool enterPreparedOTT(CFBundleRef original) { return preparedOTTEntry(pre
 static bool enterPreparedNAM(CFBundleRef original) { return preparedNAMEntry(preparedNAMBundle); }
 
 static NSString *preparedPluginBinary(NSURL *bundle,void ***slot) {
+    if (!BWIsManagedPreparedPluginBundle(bundle)) return nil;
     NSString *name=bundle.lastPathComponent;
-    NSURL *generation=BWPreparedPluginDirectory(bundle);
-    if (!generation) return nil;
-    NSString *image=BWPreparedPluginImageName(name);
     [loaderLock lock];
     if (!preparedPaths) { preparedPaths=[NSMutableDictionary new]; preparedSlots=[NSMutableDictionary new]; }
     NSString *path=preparedPaths[name];
     if (!path) {
-        NSURL *imageURL=[generation URLByAppendingPathComponent:image];
+        NSURL *generation=BWPreparedPluginDirectory(bundle);
+        if (!generation) { [loaderLock unlock]; return nil; }
+        NSURL *imageURL=[generation URLByAppendingPathComponent:BWPreparedPluginImageName(name)];
         struct stat state={};
         NSURL *manifest=[generation URLByAppendingPathComponent:@"Package.plist"];
         int lease=open(manifest.fileSystemRepresentation,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);

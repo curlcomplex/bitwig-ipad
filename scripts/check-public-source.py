@@ -45,7 +45,8 @@ def main():
         is_grid_java = path.suffix == '.java' and path.parts[:2] in {
             ('probe', 'grid-rate'), ('tests', 'grid-rate'),
         }
-        is_source = (name in ROOT_FILES or is_grid_java
+        is_plugin_refresh = name == 'probe/plugin-files/ManagedPluginRefresh.java'
+        is_source = (name in ROOT_FILES or is_grid_java or is_plugin_refresh
                      or (path.parts[0] in SOURCE_DIRS and path.suffix in SOURCE_SUFFIXES))
         if mode not in {'100644', '100755'} or object_type != 'blob' or not is_source:
             failures['unexpected path or file type'] += 1

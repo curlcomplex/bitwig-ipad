@@ -98,7 +98,9 @@ python3 scripts/prepare-plugins.py --library /Library/Audio/Plug-Ins \
   --output "$PWD/Prepared Plug-ins" --sign "Apple Development: Your Name"
 ```
 
-You can also pass individual desktop bundle paths to the Mac preparer. The iPad importer accepts its prepared output folders. Copy the prepared folders to a location visible in iPad Files. Tap **Manage Plug-ins**, choose **Import Prepared Folder**, select one prepared folder or the whole prepared library, then quit and reopen Bitwig. Use the same menu to remove an individual plug-in, then quit and reopen Bitwig to refresh discovery. Preparing your existing library keeps the original plug-in identities for saved projects. Keep the vendor licenses required by those plug-ins.
+You can also pass individual desktop bundle paths to the Mac preparer. Open Bitwig once, then open **Files → On My iPad → Bitwig → Plug-ins**. Copy each prepared package folder directly into **Plug-ins**, with its `Package.plist` and contents together. To remove a plug-in, delete its prepared folder in Files.
+
+On the supported Bitwig 6.1.7 build, the browser refreshes the managed plug-in locations when you return to Bitwig. Other supported builds pick up folder changes at the next launch. Loaded plug-ins retain their current resources until the audio engine restarts. Existing prepared installs are copied into the Files folder once, so they can be managed there too. Preparing your existing library keeps the original plug-in identities for saved projects. Keep the vendor licenses required by those plug-ins.
 
 ### Plug-ins bundled in development builds
 

@@ -13,7 +13,10 @@
 #ifdef EMBEDDED_ENGINE
 extern BOOL BWInstallEngineProcessAdapter(JNIEnv *env);
 
-static void BWCollectRetiredPlugins(NSSet *active) {
+#if BW_INDEPENDENT_PLUGIN_FILES
+static void BWCollectRetiredPlugins(NSDictionary *catalog) {
+    NSMutableSet *active=[NSMutableSet new];
+    for (NSDictionary *entry in catalog.allValues) [active addObject:entry[@"generation"]];
     NSFileManager *files=NSFileManager.defaultManager;
     for (NSURL *folder in [files contentsOfDirectoryAtURL:BWPreparedPluginRoot() includingPropertiesForKeys:nil options:0 error:nil]) {
         if ([active containsObject:folder.lastPathComponent] || ![[NSUUID alloc] initWithUUIDString:folder.lastPathComponent]) continue;
@@ -32,30 +35,49 @@ static void BWCollectRetiredPlugins(NSSet *active) {
     }
 }
 
-static NSDictionary<NSString *, NSURL *> *BWIndependentPluginLocations(void) {
+static NSDictionary<NSString *, NSURL *> *BWIndependentPluginLocations(NSSet **changedFormats) {
     NSURL *root=BWManagedPluginRoot();
     if (!root) return nil;
     NSFileManager *files=NSFileManager.defaultManager;
     struct stat state={};
-    if (lstat(root.fileSystemRepresentation,&state)==0) {
+    BOOL existing=lstat(root.fileSystemRepresentation,&state)==0;
+    if (existing) {
         if (!S_ISDIR(state.st_mode) ||
             (![files fileExistsAtPath:[root URLByAppendingPathComponent:@".managed-discovery-v1"].path] &&
              ![files fileExistsAtPath:[root URLByAppendingPathComponent:@".independent-discovery-v1"].path])) return nil;
     } else if (errno!=ENOENT) return nil;
+    NSDictionary *locations=@{@"CLAP":[root URLByAppendingPathComponent:@"CLAP" isDirectory:YES],
+                              @"VST3":[root URLByAppendingPathComponent:@"VST3" isDirectory:YES]};
+    NSURL *catalogURL=[root URLByAppendingPathComponent:@".files-catalog-v1.plist"];
+    NSDictionary *previous=[NSDictionary dictionaryWithContentsOfURL:catalogURL];
+    NSDictionary *catalog=BWPreparedPluginCatalog(previous);
+    if (!catalog && existing) return locations;
+    if ([catalog isEqual:previous]) {
+        BWCollectRetiredPlugins(catalog);
+        return locations;
+    }
+    if (!catalog) catalog=@{}; // Register the stable roots even when Files is temporarily unavailable.
+    NSMutableSet *formats=[NSMutableSet new];
+    NSMutableSet *names=[NSMutableSet setWithArray:previous.allKeys ?: @[]];
+    [names addObjectsFromArray:catalog.allKeys];
+    for (NSString *name in names) {
+        if (![catalog[name][@"generation"] isEqual:previous[name][@"generation"]])
+            [formats addObject:name.pathExtension.uppercaseString];
+    }
+    if (previous && !formats.count) {
+        if ([catalog writeToURL:catalogURL error:nil]) BWCollectRetiredPlugins(catalog);
+        return locations;
+    }
     NSURL *staging=[root.URLByDeletingLastPathComponent URLByAppendingPathComponent:
         [@"." stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
     if (![files createDirectoryAtURL:staging withIntermediateDirectories:NO attributes:nil error:nil]) return nil;
     @try {
-        NSMutableDictionary *locations=[NSMutableDictionary new];
         for (NSString *format in @[@"CLAP",@"VST3"]) {
             NSURL *folder=[staging URLByAppendingPathComponent:format isDirectory:YES];
             if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO attributes:nil error:nil]) return nil;
-            locations[format]=[root URLByAppendingPathComponent:format isDirectory:YES];
         }
-        NSDictionary *registry=BWReadPreparedPluginRegistry();
-        NSMutableSet *active=[NSMutableSet new];
-        for (NSString *name in registry) {
-            NSString *idString=registry[name];
+        for (NSString *name in catalog) {
+            NSString *idString=catalog[name][@"generation"];
             if (![name isKindOfClass:NSString.class] || !BWPreparedPluginImageName(name) ||
                 ![idString isKindOfClass:NSString.class] || ![[NSUUID alloc] initWithUUIDString:idString]) return nil;
             NSURL *generation=[BWPreparedPluginRoot() URLByAppendingPathComponent:idString isDirectory:YES];
@@ -65,18 +87,104 @@ static NSDictionary<NSString *, NSURL *> *BWIndependentPluginLocations(void) {
             if (![files createDirectoryAtURL:folder withIntermediateDirectories:NO attributes:nil error:nil] ||
                 ![files createSymbolicLinkAtURL:[folder URLByAppendingPathComponent:@"Contents"] withDestinationURL:contents error:nil])
                 return nil;
-            [active addObject:idString];
         }
+        if (![catalog writeToURL:[staging URLByAppendingPathComponent:catalogURL.lastPathComponent] error:nil]) return locations;
         NSURL *marker=[staging URLByAppendingPathComponent:@".managed-discovery-v1"];
         if (![[NSData data] writeToURL:marker options:0 error:nil]) return nil;
         if (renamex_np(staging.fileSystemRepresentation,root.fileSystemRepresentation,RENAME_EXCL)!=0 &&
             (errno!=EEXIST || renamex_np(staging.fileSystemRepresentation,root.fileSystemRepresentation,RENAME_SWAP)!=0)) return nil;
-        BWCollectRetiredPlugins(active);
+        BWCollectRetiredPlugins(catalog);
+        if (changedFormats) *changedFormats=formats;
         return locations;
     } @finally {
         [files removeItemAtURL:staging error:nil];
     }
 }
+
+#if BW_MANAGED_PLUGIN_REFRESH
+@interface BWPreparedPluginPresenter : NSObject <NSFilePresenter>
+@property (nonatomic,copy) NSURL *presentedItemURL;
+@property (nonatomic,strong) NSOperationQueue *presentedItemOperationQueue;
+@property (nonatomic,copy) dispatch_block_t changed;
+@end
+@implementation BWPreparedPluginPresenter
+- (void)presentedItemDidChange { self.changed(); }
+- (void)presentedSubitemDidAppearAtURL:(NSURL *)url { self.changed(); }
+- (void)presentedSubitemDidChangeAtURL:(NSURL *)url { self.changed(); }
+- (void)presentedSubitemAtURL:(NSURL *)oldURL didMoveToURL:(NSURL *)newURL { self.changed(); }
+- (void)accommodatePresentedSubitemDeletionAtURL:(NSURL *)url completionHandler:(void (^)(NSError *))completion {
+    completion(nil);
+    self.changed();
+}
+- (void)accommodatePresentedItemDeletionWithCompletionHandler:(void (^)(NSError *))completion {
+    completion(nil);
+    self.changed();
+}
+@end
+
+static void BWWatchPreparedPluginFolder(JavaVM *vm, JNIEnv *env) {
+    jclass helper=(*env)->FindClass(env,"ManagedPluginRefresh");
+    jmethodID request=helper ? (*env)->GetStaticMethodID(env,helper,"request","(Ljava/lang/String;Ljava/lang/String;)V") : NULL;
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); (*env)->ExceptionClear(env); }
+    if (!request) return;
+    jclass refresh=(*env)->NewGlobalRef(env,helper);
+    if (!refresh) return;
+    dispatch_queue_t queue=dispatch_queue_create("org.bitwigipad.plugin-files",DISPATCH_QUEUE_SERIAL);
+    NSMutableSet *pending=[NSMutableSet new];
+    __block NSUInteger revision=0;
+    dispatch_block_t schedule=^{
+        dispatch_async(queue, ^{
+            NSUInteger expected=++revision;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,350*NSEC_PER_MSEC),queue, ^{ @autoreleasepool {
+                if (expected!=revision) return;
+                NSSet *changed=nil;
+                NSDictionary<NSString *,NSURL *> *locations=BWIndependentPluginLocations(&changed);
+                if (changed) [pending unionSet:changed];
+                if (!locations) return;
+                JNIEnv *threadEnv=NULL;
+                if ((*vm)->AttachCurrentThreadAsDaemon(vm,(void **)&threadEnv,NULL)!=JNI_OK) return;
+                jstring clap=[pending containsObject:@"CLAP"] ? (*threadEnv)->NewStringUTF(threadEnv,locations[@"CLAP"].fileSystemRepresentation) : NULL;
+                jstring vst3=[pending containsObject:@"VST3"] ? (*threadEnv)->NewStringUTF(threadEnv,locations[@"VST3"].fileSystemRepresentation) : NULL;
+                (*threadEnv)->CallStaticVoidMethod(threadEnv,refresh,request,clap,vst3);
+                if ((*threadEnv)->ExceptionCheck(threadEnv)) {
+                    (*threadEnv)->ExceptionDescribe(threadEnv);
+                    (*threadEnv)->ExceptionClear(threadEnv);
+                } else [pending removeAllObjects];
+                (*vm)->DetachCurrentThread(vm);
+            }});
+        });
+    };
+    static BWPreparedPluginPresenter *presenter;
+    presenter=[BWPreparedPluginPresenter new];
+    presenter.presentedItemURL=BWPreparedPluginFilesFolder();
+    presenter.presentedItemOperationQueue=[NSOperationQueue new];
+    presenter.presentedItemOperationQueue.maxConcurrentOperationCount=1;
+    presenter.changed=schedule;
+    __block BOOL presenting=NO;
+    void (^startPresenting)(void)=^{
+        if (presenting || !presenter.presentedItemURL) return;
+        [NSFileCoordinator addFilePresenter:presenter];
+        presenting=YES;
+    };
+    NSNotificationCenter *notifications=NSNotificationCenter.defaultCenter;
+    [notifications addObserverForName:UIApplicationDidBecomeActiveNotification
+        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *notification) {
+            startPresenting();
+            schedule();
+        }];
+    [notifications addObserverForName:UIApplicationDidEnterBackgroundNotification
+        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(__unused NSNotification *notification) {
+            if (presenting) {
+                [NSFileCoordinator removeFilePresenter:presenter];
+                presenting=NO;
+            }
+        }];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (UIApplication.sharedApplication.applicationState!=UIApplicationStateBackground) startPresenting();
+    });
+}
+#endif
+#endif
 
 static NSDictionary<NSString *, NSURL *> *BWRefreshManagedPlugins(NSURL *frameworks) {
     NSURL *root = BWManagedPluginRoot();
@@ -283,7 +391,11 @@ static void runJava(void) {
 #endif
 #ifdef EMBEDDED_ENGINE
     NSURL *frameworks = [NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Frameworks" isDirectory:YES];
-    NSDictionary<NSString *, NSURL *> *discovery = BWIndependentPluginsEnabled() ? BWIndependentPluginLocations() : BWRefreshManagedPlugins(frameworks);
+#if BW_INDEPENDENT_PLUGIN_FILES
+    NSDictionary<NSString *, NSURL *> *discovery = BWIndependentPluginLocations(NULL);
+#else
+    NSDictionary<NSString *, NSURL *> *discovery = BWRefreshManagedPlugins(frameworks);
+#endif
     for (NSString *format in discovery)
         setenv([[format stringByAppendingString:@"_PATH"] UTF8String], discovery[format].fileSystemRepresentation, 1);
 #endif
@@ -307,6 +419,10 @@ static void runJava(void) {
     NSString *overlay = [NSBundle.mainBundle pathForResource:@"GridRate" ofType:@"jar"];
     if (!overlay) { report[@"error"] = @"Grid rate overlay missing"; save(); return; }
     classpath = [NSString stringWithFormat:@"%@:%@", overlay, classpath];
+#endif
+#if BW_MANAGED_PLUGIN_REFRESH
+    NSString *refreshJar=[NSBundle.mainBundle pathForResource:@"ManagedPluginRefresh" ofType:@"jar"];
+    if (refreshJar) classpath=[NSString stringWithFormat:@"%@:%@",refreshJar,classpath];
 #endif
     NSMutableArray *values = [@[@"-Xint", @"-Xms32m", @"-Xmx512m", @"-XX:+UseSerialGC", @"-XX:ReservedCodeCacheSize=64m",
         [@"-Djava.home=" stringByAppendingString:home],
@@ -379,6 +495,9 @@ static void runJava(void) {
         report[@"phase"]=@"embedded engine process adapter failed";save();return;
     }
     report[@"engine_process_adapter"]=@"native extension";
+#if BW_MANAGED_PLUGIN_REFRESH
+    BWWatchPreparedPluginFolder(vm,env);
+#endif
 #endif
 #if !TARGET_OS_SIMULATOR
     jclass ioKit=(*env)->FindClass(env,"com/bitwig/base/platform/MacOsXIoKit");
