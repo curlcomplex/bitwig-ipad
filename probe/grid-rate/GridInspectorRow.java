@@ -13,7 +13,8 @@ final class GridInspectorRow {
         var field = (dfB)AiR.sCA.beI(PatchGridPolicy.PROPERTY);
         var control = dDu.beI(new Choice(device, field), new Object[]{STOCK, HOST});
         control.Gef(inspector.JrT());
-        rows.IvP(aMZ.beI("Oversampling", (String)null, control));
+        rows.IvP(aMZ.beI("DSP rate",
+            "Grid oversampling. 1× uses the host sample rate. 4× uses the original processing rate.", control));
     }
 
     static final class Choice implements uB1 {

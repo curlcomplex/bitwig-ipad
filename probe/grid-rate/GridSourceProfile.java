@@ -12,6 +12,46 @@ final class GridSourceProfile {
     private record Named(String digest, Rule rule) {}
 
     private static final Map<String, Named> ARCHIVE = Map.ofEntries(
+        variant("lfo/sh_lfo/LFOPhasor.nitro", "eacde6f24e989a5579b07161fba8e094504692fda63f8486cf28fc52fba013b9"),
+        Map.entry("grid/mix/merge.nitro", new Named("c83a9711d9ce8421f265c0314490815f6b5ac24be7adeec51cb3fc2443ef574e", Rule.CARRIER)),
+        Map.entry("grid/mix/split.nitro", new Named("4250ded4fac4bcf8a00f5e4d8dae9a4e5684753c427cd1c88c7d475fa152ab75", Rule.CARRIER)),
+        Map.entry("phase/grid_multi_phase.nitro", new Named("e57139eba720632f6c7bcd0e4580a2c651ad8c1c1bf0858ca957149623273086", Rule.CARRIER)),
+        Map.entry("grid/pitch/grid_by_scale.nitro", new Named("d1dfb83fd2dde6136eff986323191230a925fb04b9b2493e40f852b65c29514e", Rule.CARRIER)),
+        Map.entry("grid/pitch/grid_pitch_quantize.nitro", new Named("ac4dda1f13a6068ec26033d448ec18f1ccba2f8aa89c5a0b9a77ef5970f52a7a", Rule.CARRIER)),
+        Map.entry("grid/pitch/grid_scale_steps.nitro", new Named("0c35d56a23b4029aa3dbee1816a978861390e6aa2bbe0834a95e6f1356ab5c3b", Rule.CARRIER)),
+        variant("grid/mix/voice_stack_mixer.nitro", "a0d5e154d3fc9e14ca11d37b276144106695788bd9cb40ff76d536945148aae9"),
+        variant("filter/Vowel.nitro", "3808c61b1f9dd3acd6c6ff718928dcd0c2a44f4daa069dceccbc62daf803ffd9"),
+        variant("filter/APFBFilter.nitro", "64fe5865f51c630d0b81c838c04a9236498753ad140cc6220f7792ba3b069069"),
+        variant("filter/ResoMon.nitro", "0c18ded26998900c5570d3558287bec73a0590d6860840a958556c0651e416ba"),
+        variant("filter/VResFilter.nitro", "491cc86ecde7ee0cec2641ac250b9b9c7e64e3b647988ff4b905730ee0a66cd6"),
+        Map.entry("device/saturator/crippel.nitro", new Named("6c76712def3c34c0f2ff2052c5f172a1c961fe064dfbdcd2e7b3110423fb4f63", Rule.CARRIER)),
+        Map.entry("grid/lfo/grid_wavetable_lfo_table_index.nitro", new Named("d50601953b65101300fa396ec80187d148847fd7f01ab59176b79871be0e0b19", Rule.CARRIER)),
+        Map.entry("grid/phase/step_access.nitro", new Named("0adaeb9cff508dd819cc0a215f5806bee738d9fee626995c86ff353728a573b6", Rule.CARRIER)),
+        Map.entry("sampler/grid_note_in.nitro", new Named("8de42c2800410b64d3638334ba3509fcbc4552f2a2d37de3a4dc02862540c636", Rule.CARRIER)),
+        Map.entry("mod_fx/chorus_module.nitro", new Named("0197de46445bbe26d0201a6a58c61fad330e9a64cbc97d30249b1362485d17ab", Rule.CARRIER)),
+        Map.entry("math/multiply.nitro", new Named("163e0d4f0e8ec3d7fc1e37a6fa90121b7d9fe7c9a0fb07ba46bccc5f44b0b7a2", Rule.CARRIER)),
+        Map.entry("grid/mix/grid_amp_and_pan.nitro", new Named("665f6c8bb8633995caf6201d3078dc5693f318f4d24e4a1e689f53fa2978a1dd", Rule.CARRIER)),
+        Map.entry("grid/io/note_thru_merge.nitro", new Named("bf0bb732f1e85153331597fbcbbf6fa51731f223de96129b783010c5676246f2", Rule.CARRIER)),
+        Map.entry("polymer/polymer_poly_logic.nitro", new Named("e724546481637cd6e5d7ddb071b6ea35a5ddfcec34c61858c6d5cfc2ae7be44a", Rule.CARRIER)),
+        Map.entry("mix/mix.nitro", new Named("69c29d545dc0362c14f6c4a612601446de50a56748d1dc7bdcdcd81a721a2639", Rule.CARRIER)),
+        Map.entry("math/add.nitro", new Named("c67fe43ac70574dea3149aabed13ab8135a936f85621030f8b5eb61cff4bf356", Rule.CARRIER)),
+        Map.entry("grid/routing/select_when_poly.nitro", new Named("e9dd38077eb67c999c7e058bc9cfdad112c4f4fd83f7484a9bd26c678a612381", Rule.CARRIER)),
+        variant("filter/LDLPF.nitro", "8caeed0fb052e89ceac6d019c59a861b13cfdf34701b3740cf6442cadc767f7d"),
+        variant("filter/xpander.nitro", "2400a46dc7c56dd2d59e6c601d71f9d0cc5cb49bf7db014c08215c6dce0cc803"),
+        variant("filter/GrandLPF.nitro", "e5356b58a99e6f9e4f6913e765df622e8822078c8bcdd6faa5fe7eea8fe5265c"),
+        variant("filter/SallenKey.nitro", "d571cc1b54505a3396b585afaa8f5ade98281b598d6f976d764abfc808cb5f71"),
+        variant("grid/oscillators/grid_bite.nitro", "42d283633f66e78393dcacfe8a7c54c10b380914deaf6adfb847958e34eada32"),
+        variant("grid/oscillators/grid_sub4.nitro", "5e16c090e721b9e9f9dd6353700bfc50015cca175b41ced1aa2ed5fa6edae276"),
+        variant("grid/oscillators/grid_swarm4.nitro", "90be7b60bdb1a3f98c5901f906c5585d34ed916af5055f5d108f1b7fe5f641ba"),
+        variant("filter/SVF.nitro", "39c9459a84113509fb9ff4f5ff8ac09d9d28964fcbde5fbfa16a897671b50719"),
+        variant("filter/Dome.nitro", "addf6290fe2b0c8f55e224e670d7716093f0be9c75a8d916c29e6e8a95d4221f"),
+        Map.entry("filter/high_cut.nitro",
+            new Named("7c65a0b87c818a867e39d43e876bc6337463cc3253ca2a7b30230c5bb0218596", Rule.CARRIER)),
+        Map.entry("grid/delay/grid_long_delay_time.nitro",
+            new Named("2db3d5b156f33bc54541bc32fa2ee260c00501b90388fa298586a763336f3dcc", Rule.CARRIER)),
+        variant("grid/logic/logic_delay.nitro", "16aaab651835704a6c014cabb6c625c6e0b811602b4d3ef01ecde21d684e71d5"),
+        variant("grid/level/grid_average.nitro", "d5d253babcf03c8e22e1d8652c7b5a4237fb46bd68b8521f5eec758c1b3bc775"),
+        variant("grid/level/shift_register.nitro", "9498f6438f849eecde00d71bc363262a920d01559eb9357ba66fb223a7105915"),
         variant("grid/data/accent_stepper.nitro", "c4c22645f8b16d27588b9c401c41b961b213238c44f9d9d451f0622196a16ce2"),
         variant("grid/data/gate_stepper.nitro", "a1ccaea0de3c4524363abc75525a468a0b23599d2dddfb5aea12d0ea8652331e"),
         variant("grid/data/pitch_stepper.nitro", "8f1ee3a951fd96d6213cdb65fb84f1ef0924f9bb0053d9f407a1af8bb1c079ae"),
@@ -26,12 +66,14 @@ final class GridSourceProfile {
             new Named("dc06f7775e23cda0878c67cbdcb2905366359345e384e96134184c18ae733a48", Rule.CARRIER)),
         Map.entry("dummy_component.nitro",
             new Named("931fc2b993d17abb0a2fcb94a1fc3d12cd67e0f277577ff76865825578b9e7af", Rule.CARRIER)),
+        variant("mod_fx/flanger_module.nitro", "bebb2566435b6e1119b17430f37cf5cf3b44ad1a98ed3fdae187e18c59f9a1ed"),
         variant("envelope/grid_ad.nitro", "16f3209e2dc2aaf550c6131a422d239f0c17a4aa488858dd86e9932637ede773"),
         variant("envelope/grid_ar.nitro", "c044f0237f25b8d47d23bc0ee726639d65527486a6bd9a3558e4913de67c8efc"),
         variant("envelope/grid_adsr.nitro", "e630faed6d3889f9cf1607be08fc4519eb22b7b51aba6a7218267ce694324330"),
         variant("grid/delay/grid_allpass_delay.nitro", "c689111d24f7c82404493750841bc8b03962917f485176d1a5d4888cc571b185"),
         variant("grid/delay/grid_delay.nitro", "c6ed90f6b01c61b3f0636232a5a0b79618b05753fa83e3c6dff30258733ee337"),
         variant("grid/delay/grid_mod_delay.nitro", "d04b4cf9ae56dc28cbf2521a5ba23985ba432bb63e79ae5b6b5929a901e56255"),
+        variant("mod_fx/phaser_module.nitro", "96c1433cd85c748877ee16a53dad468ec2f6a010b3641c8896897fef11002669"),
         variant("grid/io/trigger_merge.nitro", "c65bf54db69992bb57bbd4328498574c94bf658fed5e9e56ec045a73e89d9a44"),
         Map.entry("grid/gate/grid_gate_merge.nitro",
             new Named("f62e41745175162acb27493b5d923aaa07dbee5659eed9e09673485ffffb0162", Rule.CARRIER)),
@@ -130,6 +172,19 @@ final class GridSourceProfile {
     );
 
     private static final Map<String, Rule> EMBEDDED = Map.ofEntries(
+        Map.entry("af0981d9af8c598ca7dbac1f15c6bab6c1e4eca8db3c995690158af8f87ad291", Rule.TRANSFORM),
+        Map.entry("62ef21742eddd54edc55bae11be2b0ab441727e11dbaab6d08903ce21b7307a8", Rule.TRANSFORM),
+        Map.entry("74bd8ba902f315df25ea547c5ecfb75bf5876349f1c076d7d72046de02b90767", Rule.TRANSFORM),
+        Map.entry("679f38599e4d4b6972b8a0dd11ab8a4a7b3be190349709de3404f970d3d5da2b", Rule.TRANSFORM),
+        Map.entry("1856e86032fe7def086a989753f33de6c4640e154702086f5665edb0b74ddc0b", Rule.TRANSFORM),
+        Map.entry("b7947213672533e570140675de1316f03482ae1e3c7ed628bfcdac450fbb2c42", Rule.TRANSFORM),
+        Map.entry("b9cb2c3f29c11e356ea471273b9ded277ad6b2543b2bb54b124b64073e2a0cc4", Rule.TRANSFORM),
+        Map.entry("bf684d01268930944b6228e8f35f54b84f0d17a8b74c295dfa61fa8bcc300d2e", Rule.TRANSFORM),
+        Map.entry("84ea994e4778b4b5e3503aeecb68bfb8d3dd15f9cedb73306a276633d5e42202", Rule.TRANSFORM),
+        Map.entry("b9330d9c028930795894405e1eba9eee4a3b4daa2034a7d0be040be376f8be0e", Rule.TRANSFORM),
+        Map.entry("e8e9e94e225f71f162a4a7eb08b5e76ec5d17fff394635d7fd3bcf5038fb7e73", Rule.TRANSFORM),
+        Map.entry("8134730511971425b99de8cc6710885a84997b77ec21a600161ef421754b6e24", Rule.TRANSFORM),
+        Map.entry("54a28f0a9b4c6f25ae3be1c30363e6fabb19f7fecbbccd6e1ac0711bc1d9a691", Rule.TRANSFORM),
         Map.entry("aaac73c4c576453a96e780efe6ca230bcce9494d693b74cade5eb86b42c9c3a9", Rule.TRANSFORM),
         Map.entry("b7a0f1af0f20b8563863525251cb54737900500ee852ab5737161fcc1475da38", Rule.TRANSFORM),
         Map.entry("5678aa65e8456cf80ba1b5da3cc348a7527dce61fc9071246bad74fdf6d11af1", Rule.TRANSFORM),
@@ -154,6 +209,13 @@ final class GridSourceProfile {
 
     // Exact stock binary inputs with a proved pointwise or host-control contract.
     private static final Set<String> CARRIER_EMBEDDED = Set.of(
+        "7f5790a2e91023ed7a671ae9c1f4180e82511e01e4a219ee258189d97737ac86",
+        "9a2b4681a57da027e0cf3c556b44086fa5f9410c6857b4bbde9c2befad6c0612",
+        "688f2c0ee37f16c7f208f4a9a4a029edb260bebffd216a9d4d5da4444febcd50",
+        "5c89fb087b97b89f8b70e33bfa99017e57ef2212a933a1a9e0df54b6126ac79d",
+        "2d9f4d5f309d23c0f82045f777245fdbfa4b7f05fcafe1b8576df301eae06530",
+        "2f4b1f133dd3440129dbbc90642a8c1e16cd95e582cf8fd229bd37094032446f",
+        "62c541d01ea10e68e48e2e4eea22415b445a8d02e2feeb906e3e27400470d02b",
         "01c8e1b151e42d9fddebc574a66ed4ac89f0ed69db61f8d56abe6d4655722917",
         "027f38b1818b1092fa43b0ab7fd9ab4d306bb046f2b383be337403283caa2d72",
         "04faf59d1f20ca4635c6d49432b4e1f3268035e3a35b1c3c7cfba781902a567a",
@@ -273,6 +335,12 @@ final class GridSourceProfile {
             }
             default -> null;
         };
+    }
+
+    static boolean gridModulationFx(vP2 original) {
+        String path = original.MgQ();
+        return ("mod_fx/flanger_module.nitro".equals(path) || "mod_fx/phaser_module.nitro".equals(path))
+            && classify(original) == Rule.TRANSFORM;
     }
 
     private static String digest(byte[] payload) {

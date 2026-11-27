@@ -1,3 +1,4 @@
+import com.bitwig.flt.document.core.master.device.JXr;
 import com.bitwig.flt.document.core.master.device.ZFS;
 import com.bitwig.flt.document.core.master.device.utt;
 import com.bitwig.nitro.vP2;
@@ -82,6 +83,12 @@ public final class GridSourceSelection {
         }
         GridSourceProfile.Rule rule = GridSourceProfile.classify(source);
         if (rule == null) throw new IllegalStateException("Admitted Grid source requires a rate rule");
-        return new GridVariantInput(source, rule == GridSourceProfile.Rule.CARRIER);
+        // Only this exact source has the optional second trigger inlet.
+        // Its stock precord reader can carry a pulse, which must not be
+        // edge-detected a second time on adjacent host samples.
+        boolean builtinPulse = "grid/io/trigger_merge.nitro".equals(source.MgQ()) &&
+            atom.GKn().unz() > 2 && atom.GKn().Gef(2).mEL() instanceof JXr precord &&
+            "TRIGGER_IN".equals(precord.MgQ());
+        return new GridVariantInput(source, rule == GridSourceProfile.Rule.CARRIER, builtinPulse);
     }
 }

@@ -1,8 +1,13 @@
+import com.bitwig.nitro.ConstantDeclaration;
 import com.bitwig.nitro.NitroFile;
+import com.bitwig.nitro.QxI;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.IdentityHashMap;
 import java.util.List;
 
@@ -55,6 +60,10 @@ final class GridVariantAst {
     }
 
     static NitroFile apply(NitroFile stock) {
+        return apply(stock, false);
+    }
+
+    static NitroFile apply(NitroFile stock, boolean builtinPulse) {
         try {
             Object root = stock.ymo();
             List<Object> declarations = children(root);
@@ -62,14 +71,21 @@ final class GridVariantAst {
             case "upsampler" -> replaceProcess(declarations, "f32<2> sample = in; " + outputCarrier("sample"));
             case "downsampler" -> replaceProcess(declarations, "f32<2> sample; sample[0] = in[0]; sample[1] = in[1]; out = sample;");
             case "grid_sine4", "grid_saw4", "grid_tri4", "grid_pulse4" -> oscillator(declarations, name(root));
+            case "grid_sub4" -> sub(declarations);
+            case "grid_swarm4" -> swarm(declarations);
+            case "grid_bite_osc" -> bite(declarations);
             case "grid_union" -> union(declarations);
             case "grid_phase1" -> phaseFeedback(declarations);
-            case "grid_phasor", "grid_phasor_pm", "grid_phase_counter", "grid_lfo_phasor" ->
+            case "grid_phasor", "grid_phasor_pm", "grid_phase_counter", "grid_lfo_phasor", "LFOPhasor" ->
                 phaseCarrier(declarations,name(root));
-            case "trigger_merge" -> triggerMerge(declarations);
+            case "trigger_merge" -> triggerMerge(declarations,builtinPulse);
             case "audioToTrigger" -> audioToTrigger(declarations);
             case "grid_delay", "grid_allpass_delay" -> directDelay(declarations, name(root));
+            case "logic_delay" -> logicDelay(declarations);
+            case "grid_average" -> gridAverage(declarations);
+            case "ShiftRegister" -> shiftRegister(declarations);
             case "grid_mod_delay" -> modDelay(declarations);
+            case "slew" -> inlineSlew(declarations);
             case "DelayTime" -> modDelayTime(declarations);
             case "accent_stepper" -> stepper(declarations,true,"out_normals","out_accents");
             case "gate_stepper" -> stepper(declarations,true,"out");
@@ -78,11 +94,28 @@ final class GridVariantAst {
             case "grid_clock_divide" -> clockDivide(declarations);
             case "ClockQuantize", "GateLength", "GateRepeat" -> clockGate(declarations,name(root));
             case "GridADSR", "AD", "AR" -> adsr(declarations);
+            case "downsample_and_merge" -> tunerInput(declarations);
             case "AudioOut" -> audioOut(declarations);
             case "post" -> postMean(declarations);
+            case "voice_stack_mixer" -> voiceStackMeter(declarations);
             case "grid_lifetimer" -> voiceLifeTimer(declarations);
             case "grid_gain_expression" -> noteExpression(root,declarations,"gain");
             case "grid_pan_expression" -> noteExpression(root,declarations,"pan");
+            case "DomeFilter" -> dome(stock,declarations);
+            case "GrandLPF" -> grandLpf(stock,declarations);
+            case "SallenKey" -> sallenKey(declarations);
+            case "SVF" -> svf(stock,declarations);
+            case "LDLPF", "Xpander" -> ladder(declarations);
+            case "ResoMon" -> resonantRate(stock,declarations,"SAMPLE_RATE_NORMAL",2);
+            case "VResFilter" -> resonantRate(stock,declarations,"SAMPLE_RATE",4);
+            case "Vowel" -> vowelHostTime(declarations);
+            case "APFBFilter" -> apfbHostTime(stock,declarations);
+            case "FlangerModule" -> modulationFx(stock,declarations,"mod_fx/flanger/flanger.nitrobin",
+                "719c7f56e5afd56933669e865ab250affa367bfb08a18eb73054c085c673d5e6",
+                "Flanger","m_flanger","0.1");
+            case "PolyPhaserComponent" -> modulationFx(stock,declarations,"mod_fx/phaser/phaser.nitrobin",
+                "ff51899ccb4b8b96e337327ee96c8fce0d78f2940dd02839a608eb225e435add",
+                "PolyPhaser","m_phaser","0.25");
             case "BWLPF", "BWHPF", "BWAPF" -> butterworth(declarations);
             case "LR2", "LR3" -> crossover(declarations,name(root));
             case "tanhClip", "drunk_fold", "e_clip", "gentle_fold", "hardclip2", "s_clip", "wavefolder",
@@ -149,6 +182,132 @@ final class GridVariantAst {
         Object outputBlock = collect(nextBlock,"BlockStatement").stream().filter(b -> b != nextBlock)
             .findFirst().orElseThrow();
         blockList(outputBlock,"beI").addAll(0,waveformLocals);
+    }
+
+    private static void sub(List<Object> declarations) throws ReflectiveOperationException {
+        hostPhase(declarations);
+        Object waveform = find(declarations,"FunctionDeclaration","computeWaveForm");
+        narrowNamedVectorTypes(waveform,6);
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        narrowNamedVectorTypes(process,2);
+
+        List<Object> waves = collect(waveform,"ForStatement");
+        if (waves.size() != 2 || !print(waves.get(0)).contains("adaa.triangle") ||
+            !print(waves.get(1)).contains("adaa.sawtooth"))
+            throw new IllegalStateException("Unexpected stock Sub anti-aliasing modes");
+        for (Object loop : waves) firstOscillatorPair(loop);
+        firstOscillatorPair(find(collect(process,"ForStatement"),"ForStatement",null));
+        Object output = find(fragment("process { " + outputCarrier("z") + " }"),"ProcessBlockDeclaration",null);
+        swapAssignment(process,output,"out = z");
+    }
+
+    private static void swarm(List<Object> declarations) throws ReflectiveOperationException {
+        hostPhase(declarations);
+        narrowNamedVectorTypes(find(declarations,"FunctionDeclaration","computeSaw"),3);
+        narrowNamedVectorTypes(find(declarations,"FunctionDeclaration","computeSine"),3);
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> locals = collect(process,"VariableDeclaration");
+        for (String local : List.of("p","z","y"))
+            narrowNamedVectorTypes(find(locals,"VariableDeclaration",local),1);
+        List<Object> loops = collect(process,"ForStatement");
+        if (loops.size() != 2 || !print(loops.get(1)).contains("i < 8") ||
+            !print(loops.get(1)).contains("dephase[i]"))
+            throw new IllegalStateException("Unexpected stock Swarm voice loop");
+        firstOscillatorPair(loops.getFirst());
+
+        Object modulation = find(fragment("process { f32<2> modulation; modulation[0] = phaseIn[0]; modulation[1] = phaseIn[1]; " +
+            "p = p + phaseMod * modulation; }"),"ProcessBlockDeclaration",null);
+        swapAssignment(process,modulation,"p = p + phaseMod * phaseIn");
+
+        // Each spread voice already advances once per host tick. Keep its
+        // original increment even though the base oscillator now uses Fs.
+        Field value = field(type("AssignStatement"),"sCA");
+        Field left = field(type("BinaryExpression"),"Gef");
+        int spread = 0;
+        for (Object assignment : collect(process,"AssignStatement")) {
+            if (!print(assignment).contains("skirtq(spreadVec, skirt)")) continue;
+            for (Object product : collect(value.get(assignment),"MulExpression")) {
+                if (!print(left.get(product)).equals("(phaseInc[0]).f32")) continue;
+                Object scale = find(fragment("process { rate = (phaseInc[0]).f32 * 0.25; }"),
+                    "ProcessBlockDeclaration",null);
+                left.set(product,value.get(find(collect(scale,"AssignStatement"),"AssignStatement",null)));
+                spread++;
+            }
+        }
+        if (spread != 1) throw new IllegalStateException("Unexpected stock Swarm spread increment");
+
+        Object output = find(fragment("process { f32<2> sample = 0; " + outputCarrier("sample") + " }"),
+            "ProcessBlockDeclaration",null);
+        Object sample = find(collect(output,"VariableDeclaration"),"VariableDeclaration","sample");
+        for (Object assignment : collect(process,"AssignStatement")) {
+            if (!print(assignment).strip().startsWith("out = z *")) continue;
+            field(type("VariableDeclaration"),"Bqk").set(sample,value.get(assignment));
+            swapAssignment(process,output,print(assignment).strip().replaceFirst(";\\s*$",""));
+            return;
+        }
+        throw new IllegalStateException("Unexpected stock Swarm output gain");
+    }
+
+    private static void firstOscillatorPair(Object loop) throws ReflectiveOperationException {
+        Object guard = field(type("ForStatement"),"MgQ").get(loop);
+        Field right = field(type("BinaryExpression"),"sCA");
+        if (!print(guard).equals("i < 4") || literal(right.get(guard)) != 4)
+            throw new IllegalStateException("Unexpected stock oscillator temporal loop");
+        right.set(guard,newInteger(1));
+    }
+
+    private static void bite(List<Object> declarations) throws ReflectiveOperationException {
+        Object calculate = find(declarations,"FunctionDeclaration","computePhaseIncrement");
+        Field right = field(type("BinaryExpression"),"sCA");
+        int phaseRates = 0;
+        for (Object division : collect(calculate,"DivExpression")) {
+            Object denominator = right.get(division);
+            String clock = print(denominator);
+            if (clock.equals("EC.samplerate * 4") || clock.equals("4 * EC.samplerate")) {
+                right.set(division,biteHostRate(denominator));
+                phaseRates++;
+            }
+        }
+        if (phaseRates != 2) throw new IllegalStateException("Unexpected stock Bite phase rates");
+
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Field target = field(type("CallExpression"),"sCA");
+        Field arguments = field(type("CallExpression"),"MgQ");
+        for (String coefficient : List.of("hpfG","lpfG","rlpfG")) {
+            Object declaration = find(declarations,"VariableDeclaration",coefficient);
+            Object call = find(collect(initializer.get(declaration),"CallExpression"),"CallExpression",null);
+            @SuppressWarnings("unchecked")
+            List<Object> args = (List<Object>)arguments.get(call);
+            if (!print(target.get(call)).equals("OnePole.hzToG") || args.size() != 2)
+                throw new IllegalStateException("Unexpected stock Bite pole coefficient");
+            args.set(1,biteHostRate(args.get(1)));
+        }
+
+        // The stock cap 0.124 at 4Fs is a pitch limit of 0.496Fs.
+        // Preserve that physical limit without changing the BLEP solver.
+        Object phaseLimit = find(declarations,"VariableDeclaration","maxPhaseInc");
+        if (!print(initializer.get(phaseLimit)).equals("0.124"))
+            throw new IllegalStateException("Unexpected stock Bite phase limit");
+        Object replacement = find(fragment("f64 maxPhaseInc = 0.496;"),"VariableDeclaration","maxPhaseInc");
+        initializer.set(phaseLimit,initializer.get(replacement));
+
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Field body = field(type("ProcessBlockDeclaration"),"Gef");
+        Object temporal = find(blockList(body.get(process),"Gef"),"ForStatement",null);
+        Object guard = field(type("ForStatement"),"MgQ").get(temporal);
+        if (!print(guard).equals("i < 4") || literal(right.get(guard)) != 4)
+            throw new IllegalStateException("Unexpected stock Bite time bound");
+        right.set(guard,newInteger(1));
+        appendPairRepeat(process,"out");
+    }
+
+    private static Object biteHostRate(Object product) throws ReflectiveOperationException {
+        require(product,"MulExpression");
+        Object left = field(type("BinaryExpression"),"Gef").get(product);
+        Object right = field(type("BinaryExpression"),"sCA").get(product);
+        if (print(left).equals("EC.samplerate") && literal(right) == 4) return left;
+        if (print(right).equals("EC.samplerate") && literal(left) == 4) return right;
+        throw new IllegalStateException("Unexpected stock Bite clock factor");
     }
 
     private static void hostPhase(List<Object> declarations) throws ReflectiveOperationException {
@@ -226,7 +385,8 @@ final class GridVariantAst {
         Object process = find(declarations,"ProcessBlockDeclaration",null);
         List<Object> loops = collect(process,"ForStatement");
         boolean phasor = component.equals("grid_phasor") || component.equals("grid_phasor_pm");
-        boolean lfo = component.equals("grid_lfo_phasor");
+        boolean sampleAndHold = component.equals("LFOPhasor");
+        boolean lfo = sampleAndHold || component.equals("grid_lfo_phasor");
         if (loops.size() != (component.equals("grid_phase_counter") ? 2 : 1))
             throw new IllegalStateException("Unexpected phase loop count");
         Object timeLoop = loops.getFirst();
@@ -236,7 +396,7 @@ final class GridVariantAst {
             throw new IllegalStateException("Unexpected phase temporal guard");
         right.set(guard,newInteger(1));
         if (phasor) hostPhase(declarations);
-        if (lfo) lfoHostClock(process);
+        if (lfo) lfoHostClock(process, sampleAndHold ? 1 : 2);
 
         String repeat;
         if (lfo) repeat = "out[1] = out[0]; out[2] = out[0]; out[3] = out[0];";
@@ -260,7 +420,7 @@ final class GridVariantAst {
         throw new IllegalStateException("Expected original phase post-loop scope");
     }
 
-    private static void lfoHostClock(Object process) throws ReflectiveOperationException {
+    private static void lfoHostClock(Object process,int expectedRateExpressions) throws ReflectiveOperationException {
         Field left = field(type("BinaryExpression"),"Gef");
         Field right = field(type("BinaryExpression"),"sCA");
         int rate = 0;
@@ -278,7 +438,7 @@ final class GridVariantAst {
                 beat++;
             }
         }
-        if (rate != 2 || beat != 1) throw new IllegalStateException("Unexpected free-running LFO clocks");
+        if (rate != expectedRateExpressions || beat != 1) throw new IllegalStateException("Unexpected free-running LFO clocks");
         // The transport-synced branch already consumes host clock positions.
     }
 
@@ -315,6 +475,80 @@ final class GridVariantAst {
         if (outputs != expected) throw new IllegalStateException("Unexpected Grid delay output branches " + outputs);
     }
 
+    private static Object firstTemporalIteration(List<Object> declarations,String index)
+        throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Object loop = find(collect(process,"ForStatement"),"ForStatement",null);
+        Object condition = field(type("ForStatement"),"MgQ").get(loop);
+        Field right = field(type("BinaryExpression"),"sCA");
+        if (!print(condition).equals(index + " < 4") || literal(right.get(condition)) != 4)
+            throw new IllegalStateException("Unexpected stock temporal loop");
+        right.set(condition,newInteger(1));
+        return process;
+    }
+
+    private static void logicDelay(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = firstTemporalIteration(declarations,"i");
+        Object frames = find(collect(process,"VariableDeclaration"),"VariableDeclaration","frames");
+        Object cast = field(type("VariableDeclaration"),"Bqk").get(frames);
+        require(cast,"CastExpression");
+        Field input = field(type("UnaryExpression"),"sCA");
+        Object product = input.get(cast);
+        require(product,"MulExpression");
+        Field left = field(type("BinaryExpression"),"Gef");
+        Field right = field(type("BinaryExpression"),"sCA");
+        Object rate = right.get(product);
+        require(rate,"MulExpression");
+        if (!print(left.get(product)).equals("(length).f64") ||
+            !print(left.get(rate)).equals("EC.samplerate") || literal(right.get(rate)) != 4)
+            throw new IllegalStateException("Unexpected stock Logic Delay duration");
+        right.set(product,left.get(rate));
+
+        // Keep the original thresholds, startup guard, ring order and mode branches.
+        appendPairRepeat(process,"out");
+    }
+
+    private static void gridAverage(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = firstTemporalIteration(declarations,"i");
+        Object coefficient = find(collect(process,"VariableDeclaration"),"VariableDeclaration","C");
+        Object division = find(collect(coefficient,"DivExpression"),"DivExpression",null);
+        Field left = field(type("BinaryExpression"),"Gef");
+        Field right = field(type("BinaryExpression"),"sCA");
+        Object denominator = right.get(division);
+        require(denominator,"MulExpression");
+        if (!print(left.get(denominator)).equals("EC.samplerate") ||
+            !print(right.get(denominator)).equals("4.0"))
+            throw new IllegalStateException("Unexpected stock Average coefficient");
+        right.set(division,left.get(denominator));
+        appendPairRepeat(process,"out");
+    }
+
+    private static void shiftRegister(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = firstTemporalIteration(declarations,"k");
+        Object loop = find(collect(process,"ForStatement"),"ForStatement",null);
+        Field body = field(type("ProcessBlockDeclaration"),"Gef");
+        List<Object> statements = blockList(body.get(process),"Gef");
+        int index = statements.indexOf(loop);
+        if (index < 0) throw new IllegalStateException("Unexpected stock Shift Register scope");
+
+        // The eight taps and their meters remain intact. Extend each first
+        // stereo result over the host carrier before the original output stores.
+        var repeat = new StringBuilder("process { ");
+        for (int tap = 0; tap < 8; tap++) repeat.append('o').append(tap).append(" = o").append(tap).append("; ");
+        Object replacement = find(fragment(repeat.append('}').toString()),"ProcessBlockDeclaration",null);
+        Field value = field(type("AssignStatement"),"sCA");
+        var shuffle = type("ShuffleVectorExpression").getDeclaredConstructor(type("Expression"),
+            type("Expression"),List.class);
+        shuffle.setAccessible(true);
+        for (Object assign : blockList(body.get(replacement),"Gef")) {
+            List<Object> mask = new ArrayList<>();
+            for (int lane = 0; lane < 8; lane++) mask.add(newInteger(lane % 2));
+            Object tap = value.get(assign);
+            value.set(assign,shuffle.newInstance(tap,tap,mask));
+        }
+        statements.addAll(index+1,blockList(body.get(replacement),"Gef"));
+    }
+
     private static void modDelay(List<Object> declarations) throws ReflectiveOperationException {
         Object coefficient = find(declarations,"FunctionDeclaration","updateFilterCoeff");
         Field initializer = field(type("VariableDeclaration"),"Bqk");
@@ -335,6 +569,44 @@ final class GridVariantAst {
         Object repeat = find(fragment("process { out[0] = read; out[1] = read; out[2] = read; out[3] = read; }"),
             "ProcessBlockDeclaration",null);
         swapAssignment(process,repeat,"out[i] = read");
+    }
+
+    private static void inlineSlew(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Object loop = find(collect(process,"ForStatement"),"ForStatement",null);
+        Object guard = field(type("ForStatement"),"MgQ").get(loop);
+        Field right = field(type("BinaryExpression"),"sCA");
+        if (!print(guard).equals("i < 4") || literal(right.get(guard)) != 4)
+            throw new IllegalStateException("Unexpected stock slew time loop");
+        right.set(guard,newInteger(1));
+
+        Object step = find(collect(process,"VariableDeclaration"),"VariableDeclaration","step");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Object oldStep = initializer.get(step);
+        if (!print(oldStep).equals("rate * 1.0 / EC.samplerate"))
+            throw new IllegalStateException("Unexpected stock slew increment");
+        Object model = find(fragment("process { f32 step = originalStep * 4; " +
+            "state = (!didStart) ? x[0] : state; }"),"ProcessBlockDeclaration",null);
+        Object scale = initializer.get(find(collect(model,"VariableDeclaration"),"VariableDeclaration","step"));
+        field(type("BinaryExpression"),"Gef").set(scale,oldStep);
+        initializer.set(step,scale);
+
+        // Four stock clamps toward a constant host target cover four old
+        // increments. Seed from the actual stereo pair after start or reset.
+        Field destination = field(type("AssignStatement"),"Gef");
+        Field value = field(type("AssignStatement"),"sCA");
+        int startup = 0;
+        for (Object assignment : collect(process,"AssignStatement")) {
+            if (!print(destination.get(assignment)).equals("state") ||
+                !print(value.get(assignment)).contains("!didStart")) continue;
+            if (!print(value.get(assignment)).contains("x.+ / 4"))
+                throw new IllegalStateException("Unexpected stock slew startup");
+            Object replace = find(collect(model,"AssignStatement"),"AssignStatement",null);
+            value.set(assignment,value.get(replace));
+            startup++;
+        }
+        if (startup != 1) throw new IllegalStateException("Expected one stock slew startup");
+        appendPairRepeat(process,"out");
     }
 
     private static void modDelayTime(List<Object> declarations) throws ReflectiveOperationException {
@@ -411,14 +683,15 @@ final class GridVariantAst {
             throw new IllegalStateException("Unexpected clock/gate output branches");
     }
 
-    private static void triggerMerge(List<Object> declarations) throws ReflectiveOperationException {
+    private static void triggerMerge(List<Object> declarations,boolean builtinPulse) throws ReflectiveOperationException {
         Object process = find(declarations,"ProcessBlockDeclaration",null);
         if (collect(process,"ForStatement").size() != 1 ||
             collect(process,"AssignStatement").size() != 1 ||
             !print(process).contains("calc(in1[k], 0)"))
             throw new IllegalStateException("Unexpected stock Grid trigger merge");
+        String inlet2 = builtinPulse ? "in2[0]" : "calc(in2[0], 1)";
         replaceProcess(declarations,
-            "out[0] = enable2 ? fmax(calc(in1[0], 0), calc(in2[0], 1)) : calc(in1[0], 0); " +
+            "out[0] = enable2 ? fmax(calc(in1[0], 0), " + inlet2 + ") : calc(in1[0], 0); " +
             "out[1] = 0; out[2] = 0; out[3] = 0;");
     }
 
@@ -503,6 +776,27 @@ final class GridVariantAst {
         value.set(mean,value.get(replacement));
     }
 
+    private static void voiceStackMeter(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Field destination = field(type("AssignStatement"),"Gef");
+        Field value = field(type("AssignStatement"),"sCA");
+        Object meter = null;
+        for (Object assignment : collect(process,"AssignStatement")) {
+            if (print(destination.get(assignment)).equals("LED[stack_index]")) {
+                if (meter != null) throw new IllegalStateException("Duplicate stock voice stack meter");
+                meter = assignment;
+            }
+        }
+        if (meter == null || !print(value.get(meter)).equals("out.+"))
+            throw new IllegalStateException("Unexpected stock voice stack meter");
+
+        // Retain the stock summed LED scale for one stereo host sample.
+        Object example = find(fragment("process { LED[stack_index] = (out[0] + out[1]) * 4; }"),
+            "ProcessBlockDeclaration",null);
+        Object replacement = find(collect(example,"AssignStatement"),"AssignStatement",null);
+        value.set(meter,value.get(replacement));
+    }
+
     private static void voiceLifeTimer(List<Object> declarations) throws ReflectiveOperationException {
         Object process = find(declarations,"ProcessBlockDeclaration",null);
         List<Object> locals = collect(process,"VariableDeclaration");
@@ -521,6 +815,319 @@ final class GridVariantAst {
             if (blockList(block,"beI").remove(compare)) return;
         }
         throw new IllegalStateException("Expected stock lifetime condition scope");
+    }
+
+    private static void dome(NitroFile stock,List<Object> declarations) throws ReflectiveOperationException {
+        Object clock = find(collect(stock,"VariableDeclaration"),"VariableDeclaration","OVERSAMPLING");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> loops = collect(process,"ForStatement");
+        if (literal(initializer.get(clock)) != 4 || loops.size() != 4)
+            throw new IllegalStateException("Unexpected stock Dome geometry");
+        initializer.set(clock,newInteger(1));
+
+        Field condition = field(type("ForStatement"),"MgQ");
+        Field right = field(type("BinaryExpression"),"sCA");
+        for (int mode = 0; mode < loops.size(); mode++) {
+            Object loop = loops.get(mode);
+            Object guard = condition.get(loop);
+            if (!print(guard).equals("i < 4") || literal(right.get(guard)) != 4 ||
+                !print(loop).contains("_h" + (6 * (mode + 1)) + ".advance(y)"))
+                throw new IllegalStateException("Unexpected stock Dome state layout");
+            right.set(guard,newInteger(1));
+        }
+
+        // Complete the carrier before the stock output polarities are applied.
+        Object selector = find(collect(process,"SwitchStatement"),"SwitchStatement",null);
+        Field body = field(type("ProcessBlockDeclaration"),"Gef");
+        List<Object> statements = blockList(body.get(process),"Gef");
+        int switchIndex = statements.indexOf(selector);
+        if (switchIndex < 0) throw new IllegalStateException("Unexpected stock Dome mode scope");
+        var repeat = new StringBuilder("process { ");
+        for (String signal : List.of("real","imag","mag","phase")) {
+            for (int lane = 2; lane < 8; lane++)
+                repeat.append(signal).append('[').append(lane).append("] = ")
+                    .append(signal).append('[').append(lane % 2).append("]; ");
+        }
+        Object replacement = find(fragment(repeat.append('}').toString()),"ProcessBlockDeclaration",null);
+        statements.addAll(switchIndex+1,blockList(body.get(replacement),"Gef"));
+    }
+
+    private static void svf(NitroFile stock,List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Object clock = find(collect(process,"VariableDeclaration"),"VariableDeclaration","OVERSAMPLING");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        if (literal(initializer.get(clock)) != 4)
+            throw new IllegalStateException("Unexpected stock SVF process clock");
+        initializer.set(clock,newInteger(1));
+        appendPairRepeat(process,"out");
+
+        // Specialize the original coefficient implementation for this SVF
+        // instance only. The stock import remains available to other graphs.
+        NitroFile modules = exactStockLibrary("modules.nitrobin",
+            "a665b644e9f11211f61a5a3091e7e89fb036da0a25ee1755bafd06d0edef1a8e");
+        Object original = find(collect(modules,"StructureDeclaration"),"StructureDeclaration","SemiToG");
+        Object convert = find(collect(original,"FunctionDeclaration"),"FunctionDeclaration","calc");
+        Object rate = find(collect(convert,"VariableDeclaration"),"VariableDeclaration","OVERSAMPLING");
+        if (literal(initializer.get(rate)) != 4)
+            throw new IllegalStateException("Unexpected stock SVF coefficient clock");
+        initializer.set(rate,newInteger(1));
+
+        Class<?> structure = type("StructureDeclaration");
+        var constructor = structure.getDeclaredConstructor(String.class,List.class);
+        constructor.setAccessible(true);
+        Object host = constructor.newInstance("GridHostSemiToG",field(structure,"Anf").get(original));
+        @SuppressWarnings("unchecked")
+        List<Object> fileDeclarations = (List<Object>)field(NitroFile.class,"unz").get(stock);
+        fileDeclarations.add(fileDeclarations.indexOf(stock.ymo()),host);
+        Object old = find(declarations,"VariableDeclaration","semiToG");
+        Object next = find(fragment("GridHostSemiToG semiToG;"),"VariableDeclaration","semiToG");
+        declarations.set(declarations.indexOf(old),next);
+    }
+
+    private static NitroFile exactStockLibrary(String resource,String expectedDigest) {
+        try {
+            byte[] bytes = QxI.Gef().kwH(UhI.beI(resource));
+            String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+            if (!digest.equals(expectedDigest))
+                throw new IllegalStateException("Unexpected stock Grid library " + resource);
+            return NitroFile.beI(NitroFile.Gef,bytes);
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("Cannot load stock Grid library " + resource,error);
+        }
+    }
+
+    private static void ladder(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> locals = collect(process,"VariableDeclaration");
+        Object clock = find(locals,"VariableDeclaration","OVERSAMPLING");
+        Object period = find(locals,"VariableDeclaration","T");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Object loop = find(collect(process,"ForStatement"),"ForStatement",null);
+        Object guard = field(type("ForStatement"),"MgQ").get(loop);
+        Object seconds = initializer.get(period);
+        require(seconds,"DivExpression");
+        Field right = field(type("BinaryExpression"),"sCA");
+        if (literal(initializer.get(clock)) != 4 || !print(guard).equals("i < OVERSAMPLING") ||
+            !print(right.get(seconds)).equals("EC.samplerate * (OVERSAMPLING).f32"))
+            throw new IllegalStateException("Unexpected stock ladder time/coefficient geometry");
+        initializer.set(clock,newInteger(1));
+
+        // The original four-pole state and output mix stay in place. Only
+        // the first stereo result belongs to this host frame.
+        Object repeat = find(fragment("process { z[2] = z[0]; z[3] = z[1]; z[4] = z[0]; " +
+            "z[5] = z[1]; z[6] = z[0]; z[7] = z[1]; }"),"ProcessBlockDeclaration",null);
+        Field body = field(type("ProcessBlockDeclaration"),"Gef");
+        for (Object block : collect(process,"BlockStatement")) {
+            List<Object> statements = blockList(block,"Gef");
+            int index = statements.indexOf(loop);
+            if (index < 0) continue;
+            statements.addAll(index+1,blockList(body.get(repeat),"Gef"));
+            return;
+        }
+        throw new IllegalStateException("Unexpected stock ladder carrier scope");
+    }
+
+    private static void grandLpf(NitroFile stock,List<Object> declarations)
+        throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> locals = collect(process,"VariableDeclaration");
+        Object clock = find(locals,"VariableDeclaration","OVERSAMPLING");
+        Object period = find(locals,"VariableDeclaration","T");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Field condition = field(type("ForStatement"),"MgQ");
+        List<Object> loops = collect(process,"ForStatement");
+        var guards = new ArrayList<String>();
+        for (Object loop : loops) guards.add(print(condition.get(loop)));
+        List<String> expected = List.of("i < OVERSAMPLING");
+        Object seconds = initializer.get(period);
+        require(seconds,"DivExpression");
+        if (literal(initializer.get(clock)) != 4 || !guards.equals(expected) ||
+            !print(field(type("BinaryExpression"),"sCA").get(seconds))
+                .equals("EC.samplerate * (OVERSAMPLING).f32"))
+            throw new IllegalStateException("Unexpected stock analog filter time/pole geometry");
+
+        // The selected period sets the prewarp and outer time step. The
+        // inner pole cascades, clipping and feedback keep their stock order.
+        initializer.set(clock,newInteger(1));
+        appendPairRepeat(process,"out");
+        grandFlavor(stock,declarations);
+    }
+
+    private static void grandFlavor(NitroFile stock,List<Object> declarations)
+        throws ReflectiveOperationException {
+        NitroFile library = exactStockLibrary("filter_flavor.nitrobin",
+            "43bb0e4118206d0237162e838a1a3e1286ede946587458aff5de9f4780722c8f");
+        Object original = find(collect(library,"StructureDeclaration"),"StructureDeclaration","filter_flavor");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Field target = field(type("CallExpression"),"sCA");
+        Field arguments = field(type("CallExpression"),"MgQ");
+        for (String coefficient : List.of("hpf50","hpf5")) {
+            Object pole = find(collect(original,"VariableDeclaration"),"VariableDeclaration",coefficient);
+            Object call = find(collect(initializer.get(pole),"CallExpression"),"CallExpression",null);
+            @SuppressWarnings("unchecked")
+            List<Object> args = (List<Object>)arguments.get(call);
+            if (!print(target.get(call)).equals("hpIn.hzToG") || args.size() != 2 ||
+                !print(args.get(1)).equals("EC.samplerate * 4"))
+                throw new IllegalStateException("Unexpected stock GrandLPF coloration pole");
+            args.set(1,field(type("BinaryExpression"),"Gef").get(args.get(1)));
+        }
+
+        Class<?> structure = type("StructureDeclaration");
+        var constructor = structure.getDeclaredConstructor(String.class,List.class);
+        constructor.setAccessible(true);
+        Object host = constructor.newInstance("GridHostFilterFlavor",field(structure,"Anf").get(original));
+        @SuppressWarnings("unchecked")
+        List<Object> fileDeclarations = (List<Object>)field(NitroFile.class,"unz").get(stock);
+        fileDeclarations.add(fileDeclarations.indexOf(stock.ymo()),host);
+        Object old = find(declarations,"VariableDeclaration","flavor");
+        Object next = find(fragment("GridHostFilterFlavor flavor;"),"VariableDeclaration","flavor");
+        declarations.set(declarations.indexOf(old),next);
+    }
+
+    private static void sallenKey(List<Object> declarations)
+        throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> locals = collect(process,"VariableDeclaration");
+        Object clock = find(locals,"VariableDeclaration","OVERSAMPLING");
+        Object period = find(locals,"VariableDeclaration","T");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Field condition = field(type("ForStatement"),"MgQ");
+        List<Object> loops = collect(process,"ForStatement");
+        var guards = new ArrayList<String>();
+        for (Object loop : loops) guards.add(print(condition.get(loop)));
+        List<String> expected = List.of("i < OVERSAMPLING","b < lps","b < hps");
+        Object seconds = initializer.get(period);
+        require(seconds,"DivExpression");
+        if (literal(initializer.get(clock)) != 4 || !guards.equals(expected) ||
+            !print(field(type("BinaryExpression"),"sCA").get(seconds))
+                .equals("EC.samplerate * (OVERSAMPLING).f32"))
+            throw new IllegalStateException("Unexpected stock analog filter time/pole geometry");
+
+        // The selected period sets the prewarp and outer time step. The
+        // inner pole cascades, clipping and feedback keep their stock order.
+        initializer.set(clock,newInteger(1));
+        appendPairRepeat(process,"out");
+    }
+
+    private static void resonantRate(NitroFile stock,List<Object> declarations,String rateName,
+                                     int modeCount) throws ReflectiveOperationException {
+        @SuppressWarnings("unchecked")
+        List<Object> globals = (List<Object>)field(NitroFile.class,"unz").get(stock);
+        Object clock = find(globals,"VariableDeclaration","OVERSAMPLING");
+        Object rate = find(globals,"VariableDeclaration",rateName);
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> loops = collect(process,"ForStatement");
+        Field condition = field(type("ForStatement"),"MgQ");
+        if (literal(initializer.get(clock)) != 4 || loops.size() != modeCount ||
+            !print(initializer.get(rate)).equals("(EC.samplerate).f32 * (OVERSAMPLING).f32"))
+            throw new IllegalStateException("Unexpected stock resonant filter geometry");
+        for (Object loop : loops) {
+            if (!print(condition.get(loop)).equals("i < OVERSAMPLING"))
+                throw new IllegalStateException("Unexpected stock resonant temporal loop");
+        }
+
+        // Scope the change to the outer Grid clock. Ripple keeps its own
+        // three internal HQ steps; Rasp keeps its zero-delay feedback solve.
+        initializer.set(clock,newInteger(1));
+        appendPairRepeat(process,"out");
+    }
+
+    private static void apfbHostTime(NitroFile stock,List<Object> declarations)
+        throws ReflectiveOperationException {
+        @SuppressWarnings("unchecked")
+        List<Object> globals = (List<Object>)field(NitroFile.class,"unz").get(stock);
+        Object networkClock = find(globals,"VariableDeclaration","OVERSAMPLING");
+        Object processClock = find(declarations,"VariableDeclaration","OVERSAMPLING");
+        Object rate = find(globals,"VariableDeclaration","SAMPLE_RATE");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Object loop = find(collect(process,"ForStatement"),"ForStatement",null);
+        Object guard = field(type("ForStatement"),"MgQ").get(loop);
+        if (literal(initializer.get(networkClock)) != 4 || literal(initializer.get(processClock)) != 4 ||
+            !print(initializer.get(rate)).equals("(EC.samplerate).f32 * (OVERSAMPLING).f32") ||
+            !print(guard).equals("i < OVERSAMPLING"))
+            throw new IllegalStateException("Unexpected stock Fizz process and network clocks");
+
+        // Stock declares distinct clocks for the template and outer loop.
+        initializer.set(networkClock,newInteger(1));
+        initializer.set(processClock,newInteger(1));
+        appendPairRepeat(process,"out");
+    }
+
+    private static void vowelHostTime(List<Object> declarations) throws ReflectiveOperationException {
+        Object rate = find(declarations,"VariableDeclaration","OVERSAMPLING");
+        Object cascade = find(declarations,"VariableDeclaration","svf");
+        Object parallel = find(declarations,"VariableDeclaration","svfp");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        if (literal(initializer.get(rate)) != 4 ||
+            !print(cascade).contains("SVF!<f32<2>, OVERSAMPLING>[TOTAL_FORMANTS]") ||
+            !print(parallel).contains("SVF!<f32<2>, OVERSAMPLING>[NUM_FORMANTS]"))
+            throw new IllegalStateException("Unexpected stock vowel filter geometry");
+
+        // The named clock sets the two stock SVF template rates and their
+        // time-buffer sizes. Formant counts and host control smoothers stay.
+        initializer.set(rate,newInteger(1));
+        appendPairRepeat(find(declarations,"ProcessBlockDeclaration",null),"out");
+    }
+
+    private static void modulationFx(NitroFile stock,List<Object> declarations,String resource,
+                                     String digest,String flavor,String instance,String fadeSeconds)
+        throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        Object loop = find(collect(process,"ForStatement"),"ForStatement",null);
+        Object guard = field(type("ForStatement"),"MgQ").get(loop);
+        Field right = field(type("BinaryExpression"),"sCA");
+        if (!print(guard).equals("i < 4") || literal(right.get(guard)) != 4)
+            throw new IllegalStateException("Unexpected stock modulation FX temporal loop");
+        right.set(guard,newInteger(1));
+
+        Object repeat = find(fragment("process { output[2] = output[0]; output[3] = output[1]; " +
+            "output[4] = output[0]; output[5] = output[1]; output[6] = output[0]; output[7] = output[1]; }"),
+            "ProcessBlockDeclaration",null);
+        Field body = field(type("ProcessBlockDeclaration"),"Gef");
+        blockList(body.get(process),"Gef").addAll(blockList(body.get(repeat),"Gef"));
+
+        NitroFile library = exactStockLibrary(resource,digest);
+        @SuppressWarnings("unchecked")
+        List<Object> globals = (List<Object>)field(NitroFile.class,"unz").get(library);
+        Object original = find(globals,"StructureDeclaration",flavor);
+        Class<?> structure = type("StructureDeclaration");
+        @SuppressWarnings("unchecked")
+        List<Object> members = (List<Object>)field(structure,"Anf").get(original);
+        Object tick = find(members,"FunctionDeclaration","tick");
+        Field left = field(type("BinaryExpression"),"Gef");
+        int fadeUpdates = 0;
+        for (Object increment : collect(tick,"DivExpression")) {
+            Object denominator = right.get(increment);
+            if (!print(left.get(increment)).equals("1.0") ||
+                !print(denominator).equals("EC.samplerate * " + fadeSeconds)) continue;
+            // The original type fade bypasses SR_MULTIPLIER. Its four
+            // increments per host frame become one fourfold increment.
+            left.set(increment,newInteger(4));
+            fadeUpdates++;
+        }
+        if (fadeUpdates != 1) throw new IllegalStateException("Unexpected stock modulation FX type fade");
+
+        String hostFlavor = "GridHost" + flavor;
+        var constructor = structure.getDeclaredConstructor(String.class,List.class);
+        constructor.setAccessible(true);
+        Object host = constructor.newInstance(hostFlavor,members);
+        @SuppressWarnings("unchecked")
+        List<Object> file = (List<Object>)field(NitroFile.class,"unz").get(stock);
+        file.add(file.indexOf(stock.ymo()),host);
+        Object previous = find(declarations,"VariableDeclaration",instance);
+        Object replacement = find(fragment(hostFlavor + " " + instance + ";"),"VariableDeclaration",instance);
+        declarations.set(declarations.indexOf(previous),replacement);
+    }
+
+    static boolean isFourTimesProperty(ConstantDeclaration property) {
+        try {
+            return literal(property.Gef()) == 4;
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("Cannot read exact modulation FX multiplier",error);
+        }
     }
 
     private static void butterworth(List<Object> declarations) throws ReflectiveOperationException {
@@ -607,6 +1214,27 @@ final class GridVariantAst {
         // Keep the original drive, clipping, quality modes and feedback.
         // Repeat the final stereo result after its one state update.
         appendPairRepeat(process,"out");
+    }
+
+    private static void tunerInput(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> shuffles = collect(process,"ShuffleVectorExpression");
+        Field mask = field(type("ShuffleVectorExpression"),"BBg");
+        List<List<Integer>> expected = List.of(List.of(0,8,2,10,4,12,6,14),
+            List.of(1,9,3,11,5,13,7,15));
+        if (shuffles.size() != expected.size() || !print(process).contains("ds.proc42(merged)"))
+            throw new IllegalStateException("Unexpected stock Tuner downsampling");
+        for (int i = 0; i < shuffles.size(); i++) {
+            List<?> lanes = (List<?>)mask.get(shuffles.get(i));
+            if (lanes.size() != 8) throw new IllegalStateException("Unexpected Tuner lane count");
+            for (int lane = 0; lane < lanes.size(); lane++) {
+                if (literal(lanes.get(lane)) != expected.get(i).get(lane))
+                    throw new IllegalStateException("Unexpected Tuner stereo merge");
+            }
+        }
+        // The stock downsampler reduces four temporal pairs after summing
+        // the stereo channels of each input. 1× already supplies one pair.
+        replaceProcess(declarations,"out1 = in1[0] + in1[1]; out2 = in2[0] + in2[1];");
     }
 
     private static void audioOut(List<Object> declarations) throws ReflectiveOperationException {
