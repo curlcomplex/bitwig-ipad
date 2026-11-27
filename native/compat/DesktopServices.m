@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "Trace.h"
 #import <QuartzCore/QuartzCore.h>
 #import <CoreVideo/CoreVideo.h>
 #import <GameController/GameController.h>
@@ -34,6 +35,31 @@ int32_t ConvertFromUnicodeToText(void *info,uint32_t inputBytes,const UniChar *i
 // FSRef is an opaque 80-byte value. References issued here resolve to paths in
 // the iOS app's standard directories; no desktop filesystem is fabricated.
 static NSMutableArray<NSString*> *folderPaths;
+int32_t BWStoreFSRef(NSString *path, void *ref) {
+    if (!path || !ref) return -50;
+    @synchronized(NSFileManager.class) {
+        if (!folderPaths) folderPaths = [NSMutableArray new];
+        NSUInteger index = [folderPaths indexOfObject:path];
+        if (index == NSNotFound) {
+            index = folderPaths.count;
+            [folderPaths addObject:path];
+        }
+        uint64_t token[2] = {0x4257465352454631,index};
+        memset(ref,0,80);
+        memcpy(ref,token,sizeof(token));
+    }
+    return 0;
+}
+NSString *BWPathForFSRef(const void *ref) {
+    if (!ref) return nil;
+    uint64_t token[2];
+    memcpy(token,ref,sizeof(token));
+    @synchronized(NSFileManager.class) {
+        if (token[0] != 0x4257465352454631 || token[1] >= folderPaths.count) return nil;
+        return folderPaths[token[1]];
+    }
+}
+
 int32_t FSFindFolder(int16_t domain,uint32_t type,unsigned char create,void *ref) {
     if(!ref) return -50;
     NSString *path=nil;
@@ -46,29 +72,21 @@ int32_t FSFindFolder(int16_t domain,uint32_t type,unsigned char create,void *ref
         case 'pref': path=[NSSearchPathForDirectoriesInDomains(NSLibraryDirectory,NSUserDomainMask,YES).firstObject stringByAppendingPathComponent:@"Preferences"];break;
         case 'temp': path=NSTemporaryDirectory();break;
         case 'cusr': path=NSHomeDirectory();break;
-        default: fprintf(stderr,"[compat] FSFindFolder unsupported type 0x%x domain %d\n",type,domain);return -43;
+        default: BWCompatibilityTrace("bridge", "DesktopServices", "FSFindFolder", "unsupported_folder"); fprintf(stderr,"[compat] FSFindFolder unsupported type 0x%x domain %d\n",type,domain);return -43;
     }
     if(directory) path=NSSearchPathForDirectoriesInDomains(directory,NSUserDomainMask,YES).firstObject;
     if(!path) return -43;
     if(create&&![NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]) return -54;
     if(![NSFileManager.defaultManager fileExistsAtPath:path]) return -43;
-    @synchronized(NSFileManager.class) {
-        if(!folderPaths) folderPaths=[NSMutableArray new];
-        [folderPaths addObject:path];
-        uint64_t token[2]={0x4257465352454631,folderPaths.count-1};
-        memset(ref,0,80);memcpy(ref,token,sizeof(token));
-    }
-    return 0;
+    return BWStoreFSRef(path,ref);
 }
 int32_t FSRefMakePath(const void *ref,unsigned char *buffer,uint32_t capacity) {
-    if(!ref||!buffer) return -50;
-    uint64_t token[2];memcpy(token,ref,sizeof(token));
-    @synchronized(NSFileManager.class) {
-        if(token[0]!=0x4257465352454631||token[1]>=folderPaths.count) return -1401;
-        const char *path=folderPaths[token[1]].fileSystemRepresentation;
-        if(strlen(path)+1>capacity) return -2110;
-        memcpy(buffer,path,strlen(path)+1);
-    }
+    if (!ref || !buffer) return -50;
+    NSString *path = BWPathForFSRef(ref);
+    if (!path) return -1401;
+    const char *fileSystemPath = path.fileSystemRepresentation;
+    if (strlen(fileSystemPath)+1>capacity) return -2110;
+    memcpy(buffer,fileSystemPath,strlen(fileSystemPath)+1);
     return 0;
 }
 
@@ -97,6 +115,10 @@ int32_t UCKeyTranslate(const void *layout,uint16_t key,uint16_t action,uint32_t 
 }
 
 uint32_t CGMainDisplayID(void) { return 1; }
+size_t CGDisplayPixelsHigh(uint32_t display) {
+    return display == CGMainDisplayID() ? (size_t)UIScreen.mainScreen.nativeBounds.size.height : 0;
+}
+
 uint32_t CGDisplayPrimaryDisplay(uint32_t display) { return display==1?1:0; }
 int32_t CGGetActiveDisplayList(uint32_t capacity,uint32_t *displays,uint32_t *count) { if(!count) return 1001;*count=1;if(capacity&&displays) displays[0]=1;return 0; }
 CGSize CGDisplayScreenSize(uint32_t display) {
@@ -108,9 +130,11 @@ CGSize CGDisplayScreenSize(uint32_t display) {
 }
 bool CGCursorIsVisible(void) { return GCMouse.current!=nil; }
 int32_t CGDisplayMoveCursorToPoint(uint32_t display,CGPoint point) { return 1004; } // iPadOS has no cursor-warp API.
+int32_t CGWarpMouseCursorPosition(CGPoint point) { return 1004; }
 int32_t CGAssociateMouseAndMouseCursorPosition(bool associated) { return associated?0:1004; }
 
 typedef int32_t (^BWDisplayHandler)(void*,const CVTimeStamp*,const CVTimeStamp*,uint64_t,uint64_t*);
+typedef int32_t (*BWDisplayCallback)(void *, const CVTimeStamp *, const CVTimeStamp *, uint64_t, uint64_t *, void *);
 @interface BWUIKitDisplayLink : NSObject
 @property(nonatomic,strong) CADisplayLink *link;
 @property(nonatomic,copy) BWDisplayHandler handler;
@@ -129,6 +153,13 @@ typedef int32_t (^BWDisplayHandler)(void*,const CVTimeStamp*,const CVTimeStamp*,
 int32_t CVDisplayLinkCreateWithCGDisplay(uint32_t display,void **output) { if(!output||display!=1)return -6661;*output=(__bridge_retained void*)[BWUIKitDisplayLink new];return 0; }
 int32_t CVDisplayLinkCreateWithActiveCGDisplays(void **output) { return CVDisplayLinkCreateWithCGDisplay(1,output); }
 int32_t CVDisplayLinkSetOutputHandler(void *value,BWDisplayHandler handler) { if(!value)return -6661;((__bridge BWUIKitDisplayLink*)value).handler=handler;return 0; }
+int32_t CVDisplayLinkSetOutputCallback(void *value, BWDisplayCallback callback, void *context) {
+    if (!callback) return -6661;
+    return CVDisplayLinkSetOutputHandler(value, ^int32_t(void *link, const CVTimeStamp *now, const CVTimeStamp *next,
+                                                        uint64_t flags, uint64_t *outputFlags) {
+        return callback(link, now, next, flags, outputFlags, context);
+    });
+}
 int32_t CVDisplayLinkStart(void *value) {
     if(!value)return -6661;BWUIKitDisplayLink *object=(__bridge id)value;
     dispatch_async(dispatch_get_main_queue(),^{ if(!object.link){object.link=[CADisplayLink displayLinkWithTarget:object selector:@selector(tick:)];[object.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];}object.link.paused=NO; });return 0;

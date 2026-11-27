@@ -1,10 +1,26 @@
+#import "LocalConfiguration.h"
 // AppKit ABI bridge for Bitwig's native window classes. Implemented operations
 // delegate to UIKit. Unimplemented selectors retain NSObject's normal exception;
 // they must be implemented from observed use, never swallowed as successful calls.
 #import <UIKit/UIKit.h>
+#import "Trace.h"
+#import "HardwareKeys.h"
 #import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
+#include <stdatomic.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+// Scope receiver-failure diagnostics to classes in the compatibility bridge.
+#define BW_TRACE_MISSING_SELECTOR \
+- (void)doesNotRecognizeSelector:(SEL)selector { \
+    BWCompatibilityTrace("objc", object_getClassName(self), sel_getName(selector), "unrecognized"); \
+    [super doesNotRecognizeSelector:selector]; \
+} \
++ (void)doesNotRecognizeSelector:(SEL)selector { \
+    BWCompatibilityTrace("objc-class", class_getName(self), sel_getName(selector), "unrecognized"); \
+    [super doesNotRecognizeSelector:selector]; \
+}
 
 NSString *NSEventTrackingRunLoopMode = @"UITrackingRunLoopMode";
 NSString *NSModalPanelRunLoopMode = @"NSDefaultRunLoopMode";
@@ -20,6 +36,7 @@ id NSApp;
 static NSHashTable *bitwigWindows;
 static NSUInteger pressedMouseButtons;
 static CGPoint mouseScreenLocation;
+static BOOL BWIsCocoaPopupView(UIView *view);
 static NSUInteger currentModifierFlags;
 static UIImage *cursorImage;
 static CGPoint cursorHotSpot;
@@ -28,6 +45,84 @@ static NSUInteger cursorHideCount;
 static __weak NSView *hoveredView;
 static __weak NSView *textInputView;
 static BOOL textInputActive;
+static atomic_bool escapePressed;
+
+// CoreGraphics key-state import used by Bitwig to detect a local Escape press.
+bool CGEventSourceKeyState(int32_t source, uint16_t key) {
+    return source == 0 && key == 0x35 && atomic_load_explicit(&escapePressed, memory_order_relaxed);
+}
+
+typedef NS_OPTIONS(NSUInteger, BWTouchPhaseMask) {
+    BWTouchBegan = 1, BWTouchMoved = 2, BWTouchStationary = 4,
+    BWTouchEnded = 8, BWTouchCancelled = 16,
+};
+
+@interface NSTouch : NSObject
+@property(nonatomic, strong) NSNumber *identity;
+@property(nonatomic, weak) UIWindow *window;
+@property(nonatomic) CGPoint point;
+@property(nonatomic) BWTouchPhaseMask phase;
+@end
+
+@implementation NSTouch
+BW_TRACE_MISSING_SELECTOR
+- (NSInteger)type { return 0; } // NSTouchTypeDirect
+- (CGPoint)locationInView:(UIView *)view {
+    if (!view) return CGPointMake(self.point.x, self.window.bounds.size.height - self.point.y);
+    CGPoint local = [view convertPoint:self.point fromView:self.window];
+    if ([view respondsToSelector:@selector(isFlipped)] &&
+        !((BOOL (*)(id, SEL))objc_msgSend)(view, @selector(isFlipped)))
+        local.y = CGRectGetMaxY(view.bounds) - local.y;
+    return local;
+}
+@end
+
+// AppKit recognizers receive NSEvents, independent from UIKit recognizers.
+@interface NSGestureRecognizer : NSObject
+@property(nonatomic, weak) NSView *view;
+@property(nonatomic, weak) id delegate;
+@property(nonatomic, getter=isEnabled) BOOL enabled;
+@property(nonatomic) NSUInteger allowedTouchTypes;
+@property(nonatomic) NSInteger state;
+- (instancetype)initWithTarget:(id)target action:(SEL)action;
+- (void)touchesBeganWithEvent:(id)event;
+- (void)touchesMovedWithEvent:(id)event;
+- (void)touchesEndedWithEvent:(id)event;
+- (void)touchesCancelledWithEvent:(id)event;
+- (void)reset;
+@end
+
+@implementation NSGestureRecognizer
+BW_TRACE_MISSING_SELECTOR
+- (instancetype)initWithTarget:(id)target action:(SEL)action {
+    // BWDirectTouchRecognizer supplies nil target/action and handles events
+    // in its own override methods.
+    if ((self = [super init])) _enabled = YES;
+    return self;
+}
+- (void)touchesBeganWithEvent:(id)event {}
+- (void)touchesMovedWithEvent:(id)event {}
+- (void)touchesEndedWithEvent:(id)event {}
+- (void)touchesCancelledWithEvent:(id)event {}
+- (void)reset { self.state = 0; }
+@end
+
+static __weak UIWindow *desktopDragSeedWindow;
+static __weak UIWindow *desktopDragMoveWindow;
+static void BWUseDesktopWindowDragOrigin(Class recognizerClass);
+
+@interface BWTouchRoute : NSObject
+@property(nonatomic, strong) NSNumber *identity;
+@property(nonatomic, copy) NSArray<NSGestureRecognizer *> *recognizers;
+@property(nonatomic) CGPoint point;
+@end
+
+@implementation BWTouchRoute
+@end
+
+@interface NSObject (BWAppKitTouchDelegate)
+- (BOOL)gestureRecognizer:(NSGestureRecognizer *)recognizer shouldReceiveTouch:(NSTouch *)touch;
+@end
 
 static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
     CGPoint screen=[window convertPoint:point toWindow:nil];
@@ -39,6 +134,7 @@ static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
 @interface NSScreen : NSObject
 @end
 @implementation NSScreen
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)mainScreen { static id screen; if (!screen) screen=[self new]; return screen; }
 + (NSArray*)screens { return @[[self mainScreen]]; }
 - (CGRect)frame { return UIScreen.mainScreen.bounds; }
@@ -47,12 +143,34 @@ static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
 - (NSDictionary*)deviceDescription { return @{@"NSScreenNumber":@1}; }
 - (NSString*)localizedName { return @"iPad Display"; }
 - (NSInteger)maximumFramesPerSecond { return UIScreen.mainScreen.maximumFramesPerSecond; }
+- (UIEdgeInsets)safeAreaInsets {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        UIWindow *window = ((UIWindowScene *)scene).keyWindow;
+        if (window) return window.safeAreaInsets;
+    }
+    return UIEdgeInsetsZero;
+}
+@end
+
+// The original Bitwig image installs these screen-coordinate methods.
+@interface NSScreen (BWOriginalScreenCoordinates)
++ (instancetype)primaryScreen;
++ (instancetype)screenForFrameRect:(CGRect)rect;
++ (CGPoint)flippedCoordinate:(CGPoint)point inRect:(CGRect)rect;
+- (CGRect)pixelBounds;
+@end
+
+@interface NSObject (BWOriginalWindowCoordinates)
+- (CGRect)convertRectToGlobalPixels:(CGRect)rect;
+- (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location;
 @end
 
 @interface NSEvent : NSObject
 @property(nonatomic) CGPoint locationInWindow;
 @property(nonatomic) NSTimeInterval timestamp;
 @property(nonatomic) NSInteger type;
+@property(nonatomic) short subtype;
 @property(nonatomic) NSInteger clickCount;
 @property(nonatomic) NSInteger buttonNumber;
 @property(nonatomic) NSUInteger modifierFlags;
@@ -67,14 +185,26 @@ static CGPoint windowEventLocation(UIWindow *window, CGPoint point) {
 @property(nonatomic) BOOL isARepeat;
 @property(nonatomic,copy) NSString *characters;
 @property(nonatomic,copy) NSString *charactersIgnoringModifiers;
+@property(nonatomic, copy) NSSet<NSTouch *> *directTouches;
 @end
 @implementation NSEvent
+BW_TRACE_MISSING_SELECTOR
+#if BW_FABFILTER_EDITOR
+// Desktop plug-ins use this convention for the interval between pointer edges.
++ (NSTimeInterval)doubleClickInterval { return 0.5; }
+#endif
 + (instancetype)mouseEventWithType:(NSUInteger)type location:(CGPoint)location modifierFlags:(NSUInteger)flags timestamp:(NSTimeInterval)timestamp windowNumber:(NSInteger)number context:(id)context eventNumber:(NSInteger)eventNumber clickCount:(NSInteger)clickCount pressure:(float)pressure {
     NSEvent *event=[self new];event.type=type;event.locationInWindow=location;event.modifierFlags=flags;event.timestamp=timestamp;
     event.context=context;event.eventNumber=eventNumber;event.clickCount=clickCount;event.pressure=pressure;
     event.buttonNumber=(type==3||type==4||type==7)?1:(type>=25&&type<=27)?2:0;
     for(id window in bitwigWindows.allObjects)if(((NSInteger(*)(id,SEL))objc_msgSend)(window,@selector(windowNumber))==number){event.window=((id(*)(id,SEL))objc_msgSend)(window,@selector(uiWindow));break;}
     return event;
+}
+- (NSSet<NSTouch *> *)touchesMatchingPhase:(BWTouchPhaseMask)phases inView:(UIView *)view {
+    NSMutableSet<NSTouch *> *matches = [NSMutableSet new];
+    for (NSTouch *touch in self.directTouches)
+        if ((touch.phase & phases) && (!view || view.window == touch.window)) [matches addObject:touch];
+    return matches;
 }
 + (NSUInteger)pressedMouseButtons { return pressedMouseButtons; }
 + (CGPoint)mouseLocation { return mouseScreenLocation; }
@@ -100,6 +230,65 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
     }
     ((void(*)(id,SEL,id))objc_msgSend)(receiver,selector,event);
 }
+
+BOOL BWDeliverDetachedEditorPointerWithModifiers(UIView *view, CGPoint point, CGPoint delta, NSInteger type,
+                                                 NSUInteger modifiers) {
+    if (!NSThread.isMainThread || !view || view.window) return NO;
+    SEL selector;
+    switch (type) {
+        case 1: selector = @selector(mouseDown:); break;
+        case 2: selector = @selector(mouseUp:); break;
+        case 3: selector = @selector(rightMouseDown:); break;
+        case 4: selector = @selector(rightMouseUp:); break;
+        case 6: selector = @selector(mouseDragged:); break;
+        case 7: selector = @selector(rightMouseDragged:); break;
+        default: return NO;
+    }
+    if (![view respondsToSelector:selector]) return NO;
+    if (type == 1) pressedMouseButtons |= 1;
+    if (type == 2) pressedMouseButtons &= ~(NSUInteger)1;
+    if (type == 3) pressedMouseButtons |= 2;
+    if (type == 4) pressedMouseButtons &= ~(NSUInteger)2;
+    NSEvent *event = [NSEvent new];
+    event.type = type;
+#if BW_IPLUG_EDITOR
+    extern BOOL BWIsNAMEditorView(UIView *view);
+    // The remote viewport sends absolute touch coordinates. Tell iPlug2
+    // that these are tablet points so it does not warp an AppKit cursor.
+    if (BWIsNAMEditorView(view)) event.subtype = 1;
+#endif
+    event.clickCount = 1;
+    event.buttonNumber = type == 3 || type == 4 || type == 7 ? 1 : 0;
+    event.modifierFlags = modifiers;
+    event.locationInWindow = point;
+    event.deltaX = delta.x;
+    event.deltaY = delta.y;
+    event.timestamp = NSProcessInfo.processInfo.systemUptime;
+    deliverEvent(view, selector, event);
+    return YES;
+}
+
+BOOL BWDeliverDetachedEditorPointer(UIView *view, CGPoint point, CGPoint delta, NSInteger type) {
+    return BWDeliverDetachedEditorPointerWithModifiers(view, point, delta, type, currentModifierFlags);
+}
+
+BOOL BWDeliverDetachedEditorKey(UIView *view, NSInteger type, unsigned short keyCode, NSUInteger modifiers,
+                                NSString *characters, NSString *unmodified, BOOL repeat) {
+    if (!NSThread.isMainThread || !view || view.window) return NO;
+    SEL selector = type == 10 ? @selector(keyDown:) : type == 11 ? @selector(keyUp:) : @selector(flagsChanged:);
+    currentModifierFlags = modifiers;
+    if (![view respondsToSelector:selector]) return NO;
+    NSEvent *event = [NSEvent new];
+    event.type = type;
+    event.keyCode = keyCode;
+    event.modifierFlags = modifiers;
+    event.characters = characters;
+    event.charactersIgnoringModifiers = unmodified;
+    event.isARepeat = repeat;
+    event.timestamp = NSProcessInfo.processInfo.systemUptime;
+    deliverEvent(view, selector, event);
+    return YES;
+}
 @interface NSTrackingArea : NSObject
 @property(nonatomic) CGRect rect;
 @property(nonatomic) NSUInteger options;
@@ -111,8 +300,57 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
     if((self=[super init])){_rect=rect;_options=options;_owner=owner;_userInfo=info;}return self;
 }
 @end
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+static char BWDetachedEditorParentKey;
+
+static BOOL BWIsDetachedEditor(UIView *view) {
+#if BW_FABFILTER_EDITOR
+    extern BOOL BWIsFabFilterEditorView(UIView *view);
+    if (BWIsFabFilterEditorView(view)) return YES;
+#endif
+#if BW_IPLUG_EDITOR
+    extern BOOL BWIsNAMEditorView(UIView *view);
+    if (BWIsNAMEditorView(view)) return YES;
+#endif
+#if BW_VSTGUI_EDITOR
+    return [NSStringFromClass(view.class) isEqualToString:@"VSTGUI_NSView"];
+#else
+    return NO;
+#endif
+}
+
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR || BW_JUCE_EDITOR
+static BOOL BWIsEngineExtension(void) {
+    NSDictionary *extension = [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSExtension"];
+    return [extension[@"NSExtensionPrincipalClass"] isEqualToString:@"NativeEngineHandler"];
+}
+#endif
+#if BW_JUCE_EDITOR
+extern id BWAttachJucePopup(UIView *view, CGRect *frame);
+extern CGRect BWUpdateJucePopupFrame(id popup, CGRect frame);
+extern void BWDetachJucePopup(id popup);
+
+static CGRect BWFlipJucePopupFrame(CGRect frame) {
+    frame.origin.y = CGRectGetMaxY(NSScreen.mainScreen.frame) - CGRectGetMaxY(frame);
+    return frame;
+}
+
+void BWSetDetachedJuceCursor(CGPoint point) {
+    mouseScreenLocation = CGPointMake(point.x, CGRectGetMaxY(NSScreen.mainScreen.frame) - point.y);
+}
+
+void BWClearDetachedJuceButton(BOOL secondary) {
+    pressedMouseButtons &= ~(secondary ? 2UL : 1UL);
+}
+#endif
+
 @interface NSView : UIView <UIPointerInteractionDelegate,UIKeyInput>
+@property(nonatomic) BOOL postsFrameChangedNotifications;
+@property(nonatomic) NSUInteger focusRingType;
+@property(nonatomic, copy) NSArray<NSString *> *registeredDraggedTypes;
 @property(nonatomic) BOOL wantsLayer;
+@property(nonatomic,strong) id appearance;
 @property(nonatomic) NSInteger layerContentsRedrawPolicy;
 @property(nonatomic) NSInteger layerContentsPlacement;
 @property(nonatomic,strong) NSMutableArray<NSTrackingArea*> *tracking;
@@ -120,24 +358,80 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 @property(nonatomic,strong) UIPointerInteraction *pointerInteraction;
 @property(nonatomic,strong) UIImageView *cursorOverlay;
 @property(nonatomic) CGPoint hoverLocation;
+@property(nonatomic, strong) NSMutableArray<NSGestureRecognizer *> *appKitRecognizers;
+@property(nonatomic, strong) NSMapTable<UITouch *, BWTouchRoute *> *touchRoutes;
+@property(nonatomic, strong) UITouch *mouseTouch;
+@property(nonatomic) BOOL secondaryMouseTouch;
+@property(nonatomic, strong) NSMutableSet<UITouch *> *endingTouches;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, NSEvent *> *hardwareKeys;
+@property(nonatomic) BOOL capsLockKeyDown;
+- (void)cancelActiveContacts;
+- (void)cancelHardwareKeys;
 - (void)updateCursor;
 @end
-@implementation NSView
-+ (Class)layerClass { return CAMetalLayer.class; }
+#if BW_IPLUG_EDITOR
+@interface BWDetachedNAMParent : NSView
+@end
+@implementation BWDetachedNAMParent
+// iPlug2 forwards unhandled keys upward. The detached container ends
+// its responder chain because there is no AppKit window in the engine.
+- (void)keyDown:(NSEvent *)event {}
+- (void)keyUp:(NSEvent *)event {}
+@end
+#endif
+static void BWForwardCocoaResponderEvent(UIView *view, SEL selector, NSEvent *event) {
+    UIResponder *next = view.nextResponder;
+    if ([next respondsToSelector:selector]) ((void (*)(id, SEL, id))objc_msgSend)(next, selector, event);
+}
+
+@implementation NSView {
+    CGRect _drawingRect;
+}
+#if BW_IPLUG_EDITOR
+extern void BWPrepareNAMView(UIView *view);
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    BWPrepareNAMView(self);
+    return self;
+}
+#endif
+BW_TRACE_MISSING_SELECTOR
+// AppKit's base live-resize notifications have no effect on an ordinary
+// view. The UIKit scene still owns the actual layout and geometry updates.
+- (void)viewWillStartLiveResize {}
+- (void)viewDidEndLiveResize {}
++ (Class)layerClass {
+    Class bitwigView = NSClassFromString(@"BWView");
+    return bitwigView && [self isSubclassOfClass:bitwigView] ? CAMetalLayer.class : CALayer.class;
+}
 - (void)setWantsLayer:(BOOL)value {
     _wantsLayer=value;
     if(!value)return;
     CALayer *configured=[self makeBackingLayer];
-    CAMetalLayer *layer=(CAMetalLayer*)self.layer;
-    if(configured!=layer && [configured isKindOfClass:CAMetalLayer.class]) {
+    CALayer *layer=self.layer;
+    if(configured!=layer && [layer isKindOfClass:CAMetalLayer.class] && [configured isKindOfClass:CAMetalLayer.class]) {
         CAMetalLayer *metal=(CAMetalLayer*)configured;
-        layer.device=metal.device;layer.pixelFormat=metal.pixelFormat;
-        layer.framebufferOnly=metal.framebufferOnly;layer.backgroundColor=metal.backgroundColor;
+        CAMetalLayer *drawable=(CAMetalLayer*)layer;
+        drawable.device=metal.device;drawable.pixelFormat=metal.pixelFormat;
+        drawable.framebufferOnly=metal.framebufferOnly;layer.backgroundColor=metal.backgroundColor;
         layer.needsDisplayOnBoundsChange=metal.needsDisplayOnBoundsChange;
     }
     layer.contentsScale=UIScreen.mainScreen.scale;
-    layer.drawableSize=CGSizeMake(self.bounds.size.width*layer.contentsScale,self.bounds.size.height*layer.contentsScale);
+    if ([layer isKindOfClass:CAMetalLayer.class])
+        ((CAMetalLayer *)layer).drawableSize=CGSizeMake(self.bounds.size.width*layer.contentsScale,self.bounds.size.height*layer.contentsScale);
 }
+- (void)setNeedsDisplay:(BOOL)needsDisplay { if (needsDisplay) [self setNeedsDisplay]; }
+- (void)setFrame:(CGRect)frame {
+    CGRect previous = self.frame;
+    [super setFrame:frame];
+    if (self.postsFrameChangedNotifications && !CGRectEqualToRect(previous, self.frame))
+        [NSNotificationCenter.defaultCenter postNotificationName:@"NSViewFrameDidChangeNotification" object:self];
+}
+- (UIView *)hitTest:(CGPoint)point {
+    return [self hitTest:[self convertPoint:point fromView:self.superview] withEvent:nil];
+}
+- (void)registerForDraggedTypes:(NSArray<NSString *> *)types { self.registeredDraggedTypes = types; }
+- (void)unregisterDraggedTypes { self.registeredDraggedTypes = nil; }
 - (void)setLayerContentsRedrawPolicy:(NSInteger)policy { _layerContentsRedrawPolicy=policy;self.layer.needsDisplayOnBoundsChange=(policy==2); }
 - (void)setLayerContentsPlacement:(NSInteger)placement { _layerContentsPlacement=placement;self.layer.contentsGravity=(placement==11?kCAGravityTopLeft:kCAGravityResize); }
 - (id)makeBackingLayer { return self.layer; }
@@ -150,8 +444,85 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstResponder { return self.canBecomeFirstResponder; }
 - (void)viewDidMoveToWindow {}
+// AppKit peers call super for events they do not handle. UIKit's
+// responder chain has no Cocoa mouse/key defaults of its own.
+- (void)keyDown:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+- (void)keyUp:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+#if BW_VSTGUI_EDITOR
+- (void)rightMouseDown:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+- (void)rightMouseUp:(NSEvent *)event { BWForwardCocoaResponderEvent(self, _cmd, event); }
+#endif
+- (void)getRectsBeingDrawn:(const CGRect **)rects count:(NSInteger *)count {
+    CGContextRef context = UIGraphicsGetCurrentContext();
+    _drawingRect = context ? CGRectIntersection(self.bounds, CGContextGetClipBoundingBox(context)) : self.bounds;
+    if (rects) *rects = &_drawingRect;
+    if (count) *count = CGRectIsEmpty(_drawingRect) ? 0 : 1;
+}
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+- (void)addDetachedEditorView:(UIView *)view {
+    [super addSubview:view];
+}
+
+- (void)addSubview:(UIView *)view {
+    if (!BWIsDetachedEditor(view) || !BWIsEngineExtension()) {
+        [super addSubview:view];
+        return;
+    }
+    // IPlugView attached has already created the vendor view. Keep the
+    // vendor's view hierarchy off UIKit's scene-less desktop window.
+    NSView *parent = objc_getAssociatedObject(self, &BWDetachedEditorParentKey);
+    if (!parent) {
+        Class parentClass = NSView.class;
+#if BW_IPLUG_EDITOR
+        extern BOOL BWIsNAMEditorView(UIView *view);
+        if (BWIsNAMEditorView(view)) parentClass = BWDetachedNAMParent.class;
+#endif
+        parent = [[parentClass alloc] initWithFrame:view.bounds];
+        objc_setAssociatedObject(self, &BWDetachedEditorParentKey, parent, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    parent.frame = view.bounds;
+    [parent addDetachedEditorView:view];
+    fprintf(stderr, "%s editor attached to detached parent %.0fx%.0f\n",
+            object_getClassName(view), view.bounds.size.width, view.bounds.size.height);
+}
+#endif
 - (void)viewDidChangeBackingProperties {}
-- (void)didMoveToWindow { [super didMoveToWindow]; [self viewDidMoveToWindow]; [self viewDidChangeBackingProperties]; }
+- (void)willMoveToWindow:(UIWindow *)newWindow {
+    if (self.window && self.window != newWindow) {
+        [self cancelActiveContacts];
+        [self cancelHardwareKeys];
+        [NSNotificationCenter.defaultCenter removeObserver:self
+                                                      name:UISceneWillDeactivateNotification
+                                                    object:self.window.windowScene];
+    }
+    [super willMoveToWindow:newWindow];
+}
+
+- (void)sceneWillDeactivate:(NSNotification *)notification {
+    [self cancelActiveContacts];
+    [self cancelHardwareKeys];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window.windowScene)
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(sceneWillDeactivate:)
+                                                   name:UISceneWillDeactivateNotification object:self.window.windowScene];
+    // The vendor constructor attaches this only on macOS 27. Attach the
+    // original recognizer when our UIKit bridge can supply its touch events.
+    Class bitwigView = NSClassFromString(@"BWView");
+    Class directRecognizer = NSClassFromString(@"BWDirectTouchRecognizer");
+    if (self.window && bitwigView && directRecognizer && [self isKindOfClass:bitwigView]) {
+        BWUseDesktopWindowDragOrigin(directRecognizer);
+        BOOL attached = NO;
+        for (NSGestureRecognizer *recognizer in self.appKitRecognizers)
+            if ([recognizer isKindOfClass:directRecognizer]) attached = YES;
+        if (!attached)
+            [self addGestureRecognizer:(id)[directRecognizer new]];
+    }
+    [self viewDidMoveToWindow];
+    [self viewDidChangeBackingProperties];
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
     // UIKit resizes via bounds/layout, whereas AppKit invokes setFrameSize:.
@@ -161,6 +532,11 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 - (void)displayIfNeeded { [self layoutIfNeeded]; [self.layer displayIfNeeded]; }
 - (BOOL)canBecomeFirstResponder { return YES; }
 - (BOOL)becomeFirstResponder { if(!self.window.canBecomeKeyWindow)return NO;textInputView=self;return [super becomeFirstResponder]; }
+- (BOOL)resignFirstResponder {
+    BOOL resigned = [super resignFirstResponder];
+    if (resigned) [self cancelHardwareKeys];
+    return resigned;
+}
 - (UIView*)inputView { static UIView *empty; if(!empty)empty=[[UIView alloc] initWithFrame:CGRectZero];return textInputActive?nil:empty; }
 - (UIView*)inputAccessoryView {
     if(!textInputActive)return nil;
@@ -212,18 +588,339 @@ static void deliverEvent(id receiver,SEL selector,NSEvent *event) {
 - (void)sendTouch:(UITouch*)touch selector:(SEL)selector type:(NSInteger)type {
     if(type==1)pressedMouseButtons|=1;
     else if(type==2)pressedMouseButtons&=~(NSUInteger)1;
+    else if(type==3)pressedMouseButtons|=2;
+    else if(type==4)pressedMouseButtons&=~(NSUInteger)2;
     if(![self respondsToSelector:selector])return;
     CGPoint current=[touch locationInView:self.window],previous=[touch previousLocationInView:self.window];
     NSEvent *event=[NSEvent new];event.window=self.window;event.locationInWindow=windowEventLocation(self.window,current);event.timestamp=touch.timestamp;event.clickCount=touch.tapCount;event.type=type;event.pressure=touch.force;
     event.deltaX=current.x-previous.x;event.deltaY=current.y-previous.y;
+    if (type == 3 || type == 4 || type == 7) event.buttonNumber = 1;
     event.modifierFlags=currentModifierFlags;
-    if(type==1||type==2)fprintf(stdout,"[UIKit input] type=%ld window=(%.1f,%.1f) event=(%.1f,%.1f) windowSize=(%.1f,%.1f) viewSize=(%.1f,%.1f)\n",(long)type,current.x,current.y,event.locationInWindow.x,event.locationInWindow.y,self.window.bounds.size.width,self.window.bounds.size.height,self.bounds.size.width,self.bounds.size.height);
+    if(type>=1&&type<=4)fprintf(stdout,"[UIKit input] type=%ld window=(%.1f,%.1f) event=(%.1f,%.1f) windowSize=(%.1f,%.1f) viewSize=(%.1f,%.1f)\n",(long)type,current.x,current.y,event.locationInWindow.x,event.locationInWindow.y,self.window.bounds.size.width,self.window.bounds.size.height,self.bounds.size.width,self.bounds.size.height);
     deliverEvent(self,selector,event);
 }
-- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { currentModifierFlags=event.modifierFlags;[self becomeFirstResponder];[self sendTouch:touches.anyObject selector:@selector(mouseMoved:) type:5];[self sendTouch:touches.anyObject selector:@selector(mouseDown:) type:1]; }
-- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { currentModifierFlags=event.modifierFlags;[self sendTouch:touches.anyObject selector:@selector(mouseDragged:) type:6]; }
-- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { currentModifierFlags=event.modifierFlags;[self sendTouch:touches.anyObject selector:@selector(mouseUp:) type:2]; }
-- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event { if(!BWHandleDraggingEvent(lastApplicationEvent,YES))[self touchesEnded:touches withEvent:event]; }
+- (void)addGestureRecognizer:(UIGestureRecognizer *)recognizer {
+    if (![(id)recognizer isKindOfClass:NSGestureRecognizer.class]) {
+        [super addGestureRecognizer:recognizer];
+        return;
+    }
+    NSGestureRecognizer *appKit = (id)recognizer;
+    if (appKit.view == self) return;
+    [appKit.view removeGestureRecognizer:recognizer];
+    if (!self.appKitRecognizers) self.appKitRecognizers = [NSMutableArray new];
+    [self.appKitRecognizers addObject:appKit];
+    appKit.view = self;
+    self.multipleTouchEnabled = YES;
+    if ([NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+        fprintf(stdout, "[UIKit direct] attached %s to %s\n",
+                class_getName(appKit.class), class_getName(self.class));
+        fflush(stdout);
+    }
+}
+
+- (void)removeGestureRecognizer:(UIGestureRecognizer *)recognizer {
+    if (![(id)recognizer isKindOfClass:NSGestureRecognizer.class]) {
+        [super removeGestureRecognizer:recognizer];
+        return;
+    }
+    NSGestureRecognizer *appKit = (id)recognizer;
+    if (appKit.view != self) return;
+    [self.appKitRecognizers removeObjectIdenticalTo:appKit];
+    // Reset releases the original recognizer's outstanding contacts. Keep
+    // those UIKit routes closed until their terminal events arrive.
+    [appKit reset];
+    appKit.view = nil;
+    for (BWTouchRoute *route in self.touchRoutes.objectEnumerator) {
+        NSMutableArray *remaining = [route.recognizers mutableCopy];
+        [remaining removeObjectIdenticalTo:appKit];
+        route.recognizers = remaining;
+    }
+    self.multipleTouchEnabled = self.appKitRecognizers.count > 0;
+}
+
+- (NSTouch *)snapshotForRoute:(BWTouchRoute *)route phase:(BWTouchPhaseMask)phase {
+    NSTouch *touch = [NSTouch new];
+    touch.identity = route.identity;
+    touch.window = self.window;
+    touch.point = route.point;
+    touch.phase = phase;
+    return touch;
+}
+
+- (void)beginContacts:(NSSet<UITouch *> *)touches buttonMask:(UIEventButtonMask)buttonMask {
+    static NSUInteger nextIdentity;
+    for (UITouch *touch in touches) {
+        // Auxiliary Bitwig menus handle continuous desktop controls through
+        // AppKit mouse drags. Latch the existing pointer route on contact.
+        if (touch.type == UITouchTypeDirect && self.appKitRecognizers.count &&
+            !BWIsCocoaPopupView(self)) {
+            BWTouchRoute *route = [BWTouchRoute new];
+            route.identity = @(++nextIdentity);
+            route.point = [touch locationInView:self.window];
+            NSTouch *snapshot = [self snapshotForRoute:route phase:BWTouchBegan];
+            NSMutableArray *recipients = [NSMutableArray new];
+            for (NSGestureRecognizer *recognizer in self.appKitRecognizers.copy) {
+                if (!recognizer.enabled || !(recognizer.allowedTouchTypes & 1)) continue;
+                id delegate = recognizer.delegate;
+                if (![delegate respondsToSelector:@selector(gestureRecognizer:shouldReceiveTouch:)] ||
+                    [delegate gestureRecognizer:recognizer shouldReceiveTouch:snapshot])
+                    [recipients addObject:recognizer];
+            }
+            if (recipients.count) {
+                route.recognizers = recipients;
+                if (!self.touchRoutes)
+                    self.touchRoutes = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsStrongMemory |
+                                        NSPointerFunctionsObjectPointerPersonality
+                                                             valueOptions:NSPointerFunctionsStrongMemory];
+                [self.touchRoutes setObject:route forKey:touch];
+                continue;
+            }
+        }
+        if (!self.mouseTouch) {
+            self.mouseTouch = touch;
+            self.secondaryMouseTouch = touch.type == UITouchTypeIndirectPointer &&
+                (buttonMask & UIEventButtonMaskSecondary) && !(buttonMask & UIEventButtonMaskPrimary);
+            [self sendTouch:touch selector:@selector(mouseMoved:) type:5];
+            if (self.secondaryMouseTouch) [self sendTouch:touch selector:@selector(rightMouseDown:) type:3];
+            else [self sendTouch:touch selector:@selector(mouseDown:) type:1];
+        }
+    }
+}
+
+- (void)dispatchContacts:(NSSet<UITouch *> *)changed event:(UIEvent *)uiEvent phase:(BWTouchPhaseMask)phase {
+    BOOL terminal = phase == BWTouchEnded || phase == BWTouchCancelled;
+    if (terminal) {
+        if (!self.endingTouches) self.endingTouches = [NSMutableSet new];
+        [self.endingTouches unionSet:changed];
+    }
+    for (UITouch *touch in changed) {
+        BWTouchRoute *route = [self.touchRoutes objectForKey:touch];
+        if (route) route.point = [touch locationInView:self.window];
+    }
+    for (NSGestureRecognizer *recognizer in self.appKitRecognizers.copy) {
+        NSMutableSet *snapshots = [NSMutableSet new];
+        NSTouch *firstChanged = nil;
+        UITouch *firstUIKitTouch = nil;
+        NSUInteger remaining = 0;
+        for (UITouch *touch in self.touchRoutes.keyEnumerator) {
+            BWTouchRoute *route = [self.touchRoutes objectForKey:touch];
+            if (![route.recognizers containsObject:recognizer]) continue;
+            BOOL updated = [changed containsObject:touch];
+            if (!updated && [self.endingTouches containsObject:touch]) continue;
+            NSTouch *snapshot = [self snapshotForRoute:route phase:updated ? phase : BWTouchStationary];
+            [snapshots addObject:snapshot];
+            if (!terminal || !updated) remaining++;
+            if (!updated) continue;
+            if (!firstChanged) {
+                firstChanged = snapshot;
+                firstUIKitTouch = touch;
+            }
+        }
+        if (!firstChanged) continue;
+        NSEvent *event = [NSEvent new];
+        event.type = 29; // NSEventTypeGesture
+        event.directTouches = snapshots;
+        event.window = self.window;
+        event.timestamp = uiEvent ? uiEvent.timestamp : firstUIKitTouch.timestamp;
+        event.modifierFlags = currentModifierFlags;
+        event.locationInWindow = [firstChanged locationInView:nil];
+        lastApplicationEvent = event;
+        switch (phase) {
+            case BWTouchBegan: [recognizer touchesBeganWithEvent:event]; break;
+            case BWTouchMoved: [recognizer touchesMovedWithEvent:event]; break;
+            case BWTouchEnded: [recognizer touchesEndedWithEvent:event]; break;
+            case BWTouchCancelled: [recognizer touchesCancelledWithEvent:event]; break;
+            case BWTouchStationary: break;
+        }
+        if ([NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+            for (NSTouch *touch in snapshots) {
+                if (touch.phase == BWTouchStationary) continue;
+                fprintf(stdout, "[UIKit direct] recognizer=%s phase=%lu id=%lu active=%lu point=(%.1f,%.1f) state=%ld\n",
+                        class_getName(recognizer.class), (unsigned long)phase, touch.identity.unsignedLongValue,
+                        (unsigned long)remaining, touch.point.x, touch.point.y, (long)recognizer.state);
+            }
+            fflush(stdout);
+        }
+        if (terminal && remaining == 0) [recognizer reset];
+    }
+    if (terminal) {
+        for (UITouch *touch in changed) [self.touchRoutes removeObjectForKey:touch];
+        [self.endingTouches minusSet:changed];
+    }
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    currentModifierFlags = event.modifierFlags;
+    [self becomeFirstResponder];
+    [self beginContacts:touches buttonMask:event.buttonMask];
+    [self dispatchContacts:touches event:event phase:BWTouchBegan];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    currentModifierFlags = event.modifierFlags;
+    [self dispatchContacts:touches event:event phase:BWTouchMoved];
+    if (self.mouseTouch && [touches containsObject:self.mouseTouch]) {
+        if (self.secondaryMouseTouch) [self sendTouch:self.mouseTouch selector:@selector(rightMouseDragged:) type:7];
+        else [self sendTouch:self.mouseTouch selector:@selector(mouseDragged:) type:6];
+    }
+}
+
+- (void)finishContacts:(NSSet<UITouch *> *)touches event:(UIEvent *)event cancelled:(BOOL)cancelled {
+    currentModifierFlags = event.modifierFlags;
+    UITouch *mouse = self.mouseTouch;
+    BOOL secondary = self.secondaryMouseTouch;
+    if (mouse && [touches containsObject:mouse]) {
+        self.mouseTouch = nil;
+        self.secondaryMouseTouch = NO;
+    }
+    else mouse = nil;
+    [self dispatchContacts:touches event:event phase:cancelled ? BWTouchCancelled : BWTouchEnded];
+    if (mouse) {
+        if (secondary)
+            [self sendTouch:mouse selector:@selector(rightMouseUp:) type:4];
+        else if (!cancelled || !BWHandleDraggingEvent(lastApplicationEvent, YES))
+            [self sendTouch:mouse selector:@selector(mouseUp:) type:2];
+        else
+            pressedMouseButtons &= ~(NSUInteger)1;
+    }
+}
+
+- (void)cancelActiveContacts {
+    NSMutableSet<UITouch *> *active = [NSMutableSet setWithArray:self.touchRoutes.keyEnumerator.allObjects ?: @[]];
+    if (self.mouseTouch) [active addObject:self.mouseTouch];
+    if (self.endingTouches) [active minusSet:self.endingTouches];
+    if (active.count) [self finishContacts:active event:nil cancelled:YES];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self finishContacts:touches event:event cancelled:NO];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self finishContacts:touches event:event cancelled:YES];
+}
+
+- (void)deliverHardwareKey:(NSEvent *)event {
+    SEL selector = event.type == 12 ? @selector(flagsChanged:) :
+        event.type == 10 ? @selector(keyDown:) : @selector(keyUp:);
+    if (!textInputActive && ((event.modifierFlags & (UIKeyModifierCommand | UIKeyModifierControl)) ||
+                            event.type == 12 || event.keyCode == 49 || event.keyCode == 53) &&
+        [NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+        fprintf(stdout, "[UIKit hardware] type=%ld code=%u flags=%lx repeat=%d\n",
+                (long)event.type, event.keyCode, (unsigned long)event.modifierFlags, event.isARepeat);
+        fflush(stdout);
+    }
+    if ([self respondsToSelector:selector]) deliverEvent(self, selector, event);
+}
+
+- (BOOL)handleHardwarePress:(UIPress *)press down:(BOOL)down {
+    UIKey *key = press.key;
+    if (!key) return NO;
+    UIKeyboardHIDUsage usage = key.keyCode;
+    BOOL capsLock = usage == UIKeyboardHIDUsageKeyboardCapsLock;
+    if (capsLock) {
+        // The original flagsChanged handler sends both native key edges.
+        // One physical press drives one toggle, with no synthetic release.
+        BOOL firstDown = down && !self.capsLockKeyDown;
+        self.capsLockKeyDown = down;
+        if ([NSProcessInfo.processInfo.arguments containsObject:@"--native-touch-trace"]) {
+            fprintf(stdout, "[UIKit caps] down=%d first=%d flags=%lx\n", down, firstDown,
+                    (unsigned long)key.modifierFlags);
+            fflush(stdout);
+        }
+        if (!firstDown) return YES;
+    }
+    NSInteger code = BWMacVirtualKey(usage);
+    if (code < 0) return NO;
+
+    NSNumber *identifier = @(usage);
+    NSEvent *held = self.hardwareKeys[identifier];
+    NSUInteger modifier = BWKeyModifier(usage);
+    BOOL modifierEvent = modifier || capsLock;
+    if (!down && !held) return NO;
+    NSUInteger flags = key.modifierFlags;
+    if (modifier) {
+        flags &= ~modifier;
+        if (down) flags |= modifier;
+        for (NSNumber *other in self.hardwareKeys)
+            if (![other isEqual:identifier]) flags |= BWKeyModifier(other.integerValue);
+    }
+
+    // UIKit already sends composed text and backspace through UIKeyInput.
+    // Keep that path for normal text while forwarding real shortcuts and
+    // navigation as key events. A held key always stays on its original path.
+    NSString *characters = key.characters ?: @"";
+    NSString *unmodified = key.charactersIgnoringModifiers ?: @"";
+    BOOL editableKey = usage == UIKeyboardHIDUsageKeyboardDeleteOrBackspace ||
+        (usage >= UIKeyboardHIDUsageKeyboardA && usage <= UIKeyboardHIDUsageKeyboard0) ||
+        (usage >= UIKeyboardHIDUsageKeyboardSpacebar && usage <= UIKeyboardHIDUsageKeyboardSlash) ||
+        (characters.length && [characters rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound &&
+         [characters characterAtIndex:0] < 0xf700);
+    if (down && !held && !modifierEvent && editableKey && textInputActive && textInputView == self &&
+        !(flags & (UIKeyModifierCommand | UIKeyModifierControl))) return NO;
+
+    if (modifierEvent) characters = unmodified = @"";
+    else if (usage == UIKeyboardHIDUsageKeyboardDeleteOrBackspace) characters = unmodified = @"\177";
+    NSEvent *event = [NSEvent new];
+    event.type = modifierEvent ? 12 : (down ? 10 : 11);
+    event.keyCode = (unsigned short)code;
+    event.characters = characters;
+    event.charactersIgnoringModifiers = unmodified;
+    event.modifierFlags = currentModifierFlags = flags;
+    event.timestamp = press.timestamp;
+    event.window = self.window;
+    event.isARepeat = down && held && !modifierEvent;
+    if (down && !capsLock) {
+        if (!self.hardwareKeys) self.hardwareKeys = [NSMutableDictionary new];
+        self.hardwareKeys[identifier] = event;
+    } else if (!down) [self.hardwareKeys removeObjectForKey:identifier];
+    if (usage == UIKeyboardHIDUsageKeyboardEscape)
+        atomic_store_explicit(&escapePressed, down, memory_order_relaxed);
+    [self deliverHardwareKey:event];
+    return YES;
+}
+
+- (void)cancelHardwareKeys {
+    NSArray<NSEvent *> *held = self.hardwareKeys.allValues;
+    [self.hardwareKeys removeAllObjects];
+    self.capsLockKeyDown = NO;
+    currentModifierFlags &= UIKeyModifierAlphaShift;
+    atomic_store_explicit(&escapePressed, false, memory_order_relaxed);
+    for (NSEvent *prior in held) {
+        NSEvent *event = [NSEvent new];
+        event.type = prior.type == 12 ? 12 : 11;
+        event.keyCode = prior.keyCode;
+        event.characters = prior.characters;
+        event.charactersIgnoringModifiers = prior.charactersIgnoringModifiers;
+        event.modifierFlags = currentModifierFlags;
+        event.timestamp = NSProcessInfo.processInfo.systemUptime;
+        event.window = self.window;
+        [self deliverHardwareKey:event];
+    }
+}
+
+- (NSSet<UIPress *> *)unhandledHardwarePresses:(NSSet<UIPress *> *)presses down:(BOOL)down {
+    NSMutableSet<UIPress *> *unhandled = [NSMutableSet new];
+    for (UIPress *press in presses)
+        if (![self handleHardwarePress:press down:down]) [unhandled addObject:press];
+    return unhandled;
+}
+
+- (void)pressesBegan:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    NSSet *unhandled = [self unhandledHardwarePresses:presses down:YES];
+    if (unhandled.count) [super pressesBegan:unhandled withEvent:event];
+}
+
+- (void)pressesEnded:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    NSSet *unhandled = [self unhandledHardwarePresses:presses down:NO];
+    if (unhandled.count) [super pressesEnded:unhandled withEvent:event];
+}
+
+- (void)pressesCancelled:(NSSet<UIPress *> *)presses withEvent:(UIPressesEvent *)event {
+    NSSet *unhandled = [self unhandledHardwarePresses:presses down:NO];
+    if (unhandled.count) [super pressesCancelled:unhandled withEvent:event];
+}
+
 @end
 
 void BWUIKitSetTextInputActive(BOOL active) {
@@ -251,18 +948,68 @@ void BWUIKitSetTextInputActive(BOOL active) {
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 @end
 
+// These AppKit bits are supplied by the original BWWindow constructor.
+static const NSUInteger BWWindowResizable = 1ul << 3;
+static const NSUInteger BWWindowFullScreenPrimary = 1ul << 7;
+static const NSUInteger BWWindowFullScreenAuxiliary = 1ul << 8;
+
+@protocol BWSceneWindow
+- (void)bwSyncSceneFrame;
+- (BOOL)bwFollowsScene;
+@end
+
 @interface BWUIKitWindow : UIWindow
 @property(nonatomic,weak) id desktopWindow;
 @end
+@interface UIWindow (BWUIKitFrameOrigin)
+- (void)setFrameOrigin:(CGPoint)origin;
+@end
 @implementation BWUIKitWindow
+- (CGPoint)convertEventScreenLocationBackingStore:(CGPoint)location {
+    id desktop = self.desktopWindow;
+    if (![desktop respondsToSelector:@selector(convertRectToGlobalPixels:)] ||
+        ![NSScreen respondsToSelector:@selector(screenForFrameRect:)] ||
+        ![NSScreen respondsToSelector:@selector(primaryScreen)] ||
+        ![NSScreen respondsToSelector:@selector(flippedCoordinate:inRect:)])
+        return [desktop convertEventScreenLocationBackingStore:location];
+
+    CGRect probe = CGRectMake(location.x, location.y, 1, 1);
+    if ([NSScreen screenForFrameRect:probe])
+        return [desktop convertEventScreenLocationBackingStore:location];
+
+    NSScreen *primary = [NSScreen primaryScreen];
+    if (![primary respondsToSelector:@selector(pixelBounds)])
+        return [desktop convertEventScreenLocationBackingStore:location];
+
+    // Use the sending window's screen even at or beyond its edge. The
+    // original event conversion chooses a screen by rectangle overlap and
+    // leaves the coordinates in points if the probe misses every screen.
+    CGRect pixels = [desktop convertRectToGlobalPixels:probe];
+    return [NSScreen flippedCoordinate:pixels.origin inRect:primary.pixelBounds];
+}
+
+- (CGRect)frame {
+    if (self == desktopDragSeedWindow && self.desktopWindow)
+        return ((CGRect (*)(id, SEL))objc_msgSend)(self.desktopWindow, _cmd);
+    return [super frame];
+}
+- (void)setFrameOrigin:(CGPoint)origin {
+    id desktop = self.desktopWindow;
+    if (self != desktopDragMoveWindow || !desktop) {
+        [super setFrameOrigin:origin];
+        return;
+    }
+    desktopDragMoveWindow = nil;
+    @try {
+        ((void (*)(id, SEL, CGPoint))objc_msgSend)(desktop, _cmd, origin);
+    } @finally {
+        desktopDragMoveWindow = self;
+    }
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
-    id desktop=self.desktopWindow;
-    if (desktop && (((NSUInteger(*)(id,SEL))objc_msgSend)(desktop,@selector(styleMask))&8)) {
-        CGRect bounds=self.windowScene.coordinateSpace.bounds;
-        if (!CGRectEqualToRect([desktop frame],bounds))
-            ((void(*)(id,SEL,CGRect,BOOL))objc_msgSend)(desktop,@selector(setFrame:display:),bounds,YES);
-    }
+    id<BWSceneWindow> desktop=self.desktopWindow;
+    [desktop bwSyncSceneFrame];
 }
 - (BOOL)respondsToSelector:(SEL)selector { return [super respondsToSelector:selector]||[self.desktopWindow respondsToSelector:selector]; }
 - (BOOL)canBecomeKeyWindow { return self.desktopWindow?((BOOL(*)(id,SEL))objc_msgSend)(self.desktopWindow,@selector(canBecomeKeyWindow)):[super canBecomeKeyWindow]; }
@@ -280,6 +1027,9 @@ void BWUIKitSetTextInputActive(BOOL active) {
     dispatch_async(dispatch_get_main_queue(),^{if(self.isKeyWindow)[self notifyKeyState:YES];});
 }
 - (void)resignKeyWindow {
+    UIView *view = self.rootViewController.view;
+    if ([view isKindOfClass:NSView.class]) [(NSView *)view cancelHardwareKeys];
+    atomic_store_explicit(&escapePressed, false, memory_order_relaxed);
     [super resignKeyWindow];
     dispatch_async(dispatch_get_main_queue(),^{if(!self.isKeyWindow)[self notifyKeyState:NO];});
 }
@@ -288,9 +1038,64 @@ void BWUIKitSetTextInputActive(BOOL active) {
     return [super forwardingTargetForSelector:selector];
 }
 @end
-@interface NSWindow : NSObject
+
+static void BWUseDesktopWindowDragOrigin(Class recognizerClass) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        SEL selector = NSSelectorFromString(@"setWindowDragTouch:");
+        SEL move = NSSelectorFromString(@"dragWindowWithTouch:");
+        Method method = class_getInstanceMethod(recognizerClass, selector);
+        Method moveMethod = class_getInstanceMethod(recognizerClass, move);
+        if (!method || !moveMethod) return;
+        void (*setWindowDragTouch)(id, SEL, NSTouch *) = (void *)method_getImplementation(method);
+        IMP shim = imp_implementationWithBlock(^(NSGestureRecognizer *recognizer, NSTouch *touch) {
+            // This selector reads view.window.frame to seed the drag and its
+            // move handler later writes the desktop origin via setFrameOrigin:.
+            // Both the UIKit dispatch and original callback run on main.
+            UIWindow *previous = desktopDragSeedWindow;
+            desktopDragSeedWindow = recognizer.view.window;
+            @try {
+                setWindowDragTouch(recognizer, selector, touch);
+            } @finally {
+                desktopDragSeedWindow = previous;
+            }
+        });
+        BOOL (*dragWindowWithTouch)(id, SEL, NSTouch *) = (void *)method_getImplementation(moveMethod);
+        IMP moveShim = imp_implementationWithBlock(^BOOL(NSGestureRecognizer *recognizer, NSTouch *touch) {
+            // UIKit itself also implements setFrameOrigin:. Route only the
+            // original desktop drag through NSWindow's coordinate transform.
+            UIWindow *previous = desktopDragMoveWindow;
+            desktopDragMoveWindow = recognizer.view.window;
+            @try {
+                return dragWindowWithTouch(recognizer, move, touch);
+            } @finally {
+                desktopDragMoveWindow = previous;
+            }
+        });
+        class_replaceMethod(recognizerClass, selector, shim, method_getTypeEncoding(method));
+        class_replaceMethod(recognizerClass, move, moveShim, method_getTypeEncoding(moveMethod));
+    });
+}
+
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+extern id BWPublishDetachedEditorView(UIView *view, dispatch_block_t close);
+extern void BWStopPublishingDetachedEditor(id publisher);
+
+static UIView *BWDetachedEditorChild(UIView *view) {
+    UIView *detachedParent = objc_getAssociatedObject(view, &BWDetachedEditorParentKey);
+    if (BWIsDetachedEditor(detachedParent.subviews.firstObject)) return detachedParent.subviews.firstObject;
+    for (UIView *child in view.subviews) {
+        UIView *editor = BWDetachedEditorChild(child);
+        if (editor) return editor;
+    }
+    return nil;
+}
+#endif
+
+@interface NSWindow : NSObject <BWSceneWindow>
 @property(nonatomic,strong) UIWindow *uiWindow;
 @property(nonatomic,strong) NSView *contentView;
+@property(nonatomic,strong) id colorSpace;
 @property(nonatomic,weak) id delegate;
 @property(nonatomic,copy) NSString *title;
 @property(nonatomic) BOOL releasedWhenClosed;
@@ -304,17 +1109,76 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic) BOOL miniaturized;
 @property(nonatomic) CGRect frameBeforeZoom;
 @property(nonatomic) CGRect desktopFrame;
+@property(nonatomic) CGRect initialFrame;
+@property(nonatomic) CGRect requestedFrame;
+@property(nonatomic) BOOL requestedFullScene;
+@property(nonatomic) BOOL hasBeenShown;
+#if BW_JUCE_EDITOR
+@property(nonatomic, strong) id detachedJucePopup;
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+@property(nonatomic, strong) id detachedEditorPublisher;
+#endif
 // Desktop policy hints retained for callers. UIKit owns scene movement,
 // capture policy and background hiding; these hints cannot override it.
 @property(nonatomic) BOOL canHide;
 @property(nonatomic) BOOL preservesContentDuringLiveResize;
 @property(nonatomic) BOOL movableByWindowBackground;
+@property(nonatomic, getter=isMovable) BOOL movable;
 @property(nonatomic) BOOL titlebarAppearsTransparent;
+@property(nonatomic) BOOL showsResizeIndicator;
+@property(nonatomic) BOOL ignoresMouseEvents;
+@property(nonatomic) BOOL hidesOnDeactivate;
+@property(nonatomic) BOOL excludedFromWindowsMenu;
+@property(nonatomic) BOOL restorable;
+@property(nonatomic) NSInteger tabbingMode;
+@property(nonatomic) BOOL allowsToolTipsWhenApplicationIsInactive;
 @property(nonatomic) NSInteger titleVisibility;
 @property(nonatomic) NSUInteger sharingType;
 @property(nonatomic,copy) NSArray *registeredDraggedTypes;
 @end
+#if BW_FABFILTER_EDITOR
+static void BWDetachedScreenFlush(NSWindow *window, SEL selector) {
+    // The detached engine window has no screen updates to defer or backing
+    // store to flush. The publisher transfers the next completed frame.
+    if (window.uiWindow.windowScene) [window doesNotRecognizeSelector:selector];
+}
+
+static void BWDisplayDetachedPluginWindow(NSWindow *window, SEL selector) {
+    if (window.uiWindow.windowScene) {
+        [window doesNotRecognizeSelector:selector];
+        return;
+    }
+    [window.contentView displayIfNeeded];
+}
+#endif
+
+static BOOL BWIsCocoaPopupView(UIView *view) {
+    UIWindow *window = view.window;
+    if (![window isKindOfClass:BWUIKitWindow.class]) return NO;
+    NSWindow *desktop = ((BWUIKitWindow *)window).desktopWindow;
+    return desktop.class == NSClassFromString(@"BWWindow") && view.class == NSClassFromString(@"BWView") &&
+        desktop.contentView == view && desktop.styleMask == 0 &&
+        desktop.collectionBehavior == BWWindowFullScreenAuxiliary;
+}
+
 @implementation NSWindow
+#if BW_FABFILTER_EDITOR
++ (BOOL)resolveInstanceMethod:(SEL)selector {
+    if (self == NSClassFromString(@"CocoaPluginWindow") && BWIsEngineExtension()) {
+        IMP implementation = NULL;
+        if (selector == @selector(disableScreenUpdatesUntilFlush) || selector == @selector(flushWindowIfNeeded))
+            implementation = (IMP)BWDetachedScreenFlush;
+        else if (selector == @selector(displayIfNeeded))
+            implementation = (IMP)BWDisplayDetachedPluginWindow;
+        if (implementation)
+            return class_addMethod(self, selector, implementation, "v@:") ||
+                class_getInstanceMethod(self, selector) != NULL;
+    }
+    return [super resolveInstanceMethod:selector];
+}
+#endif
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithContentRect:(CGRect)rect styleMask:(NSUInteger)style backing:(NSUInteger)backing defer:(BOOL)defer screen:(NSScreen*)screen {
     return [self initWithContentRect:rect styleMask:style backing:backing defer:defer];
 }
@@ -324,11 +1188,13 @@ void BWUIKitSetTextInputActive(BOOL active) {
         UIWindowScene *scene=(UIWindowScene*)UIApplication.sharedApplication.connectedScenes.anyObject;
         BWUIKitWindow *window=[[BWUIKitWindow alloc] initWithWindowScene:scene];
         window.desktopWindow=self;_uiWindow=window;
-        if(style&8)rect=scene.coordinateSpace.bounds;
-        _desktopFrame=rect;
-        _uiWindow.frame=CGRectMake(rect.origin.x,scene.coordinateSpace.bounds.size.height-CGRectGetMaxY(rect),rect.size.width,rect.size.height);
         _uiWindow.rootViewController=[BWHostViewController new];
         _styleMask=style;
+        _initialFrame=rect;
+        _requestedFrame=rect;
+        [self applyDesktopFrame:rect];
+        [self recordFullSceneRequest:rect];
+        _movable=YES;
         static NSInteger nextNumber=1;_windowNumber=nextNumber++;
         _maxSize=CGSizeMake(CGFLOAT_MAX,CGFLOAT_MAX);
         if(!bitwigWindows)bitwigWindows=[NSHashTable weakObjectsHashTable];
@@ -336,6 +1202,41 @@ void BWUIKitSetTextInputActive(BOOL active) {
     }
     return self;
 }
+- (CGRect)bwSceneBounds { return self.uiWindow.windowScene.coordinateSpace.bounds; }
+
+- (BOOL)bwFollowsScene {
+    return self.requestedFullScene && (self.styleMask & BWWindowResizable) &&
+           (self.collectionBehavior & BWWindowFullScreenPrimary) &&
+           !(self.collectionBehavior & BWWindowFullScreenAuxiliary);
+}
+
+- (void)recordFullSceneRequest:(CGRect)request {
+    // Only the original initial placement signals the editor's scene-sized
+    // intent. Later frame changes (including Zoom) retain normal desktop rules.
+    CGRect sceneBounds = self.bwSceneBounds;
+    if (!self.hasBeenShown && !self.isVisible)
+        self.requestedFullScene = !CGRectIsEmpty(sceneBounds) && CGRectEqualToRect(request, sceneBounds);
+}
+
+- (void)applyDesktopFrame:(CGRect)frame {
+    self.desktopFrame = frame;
+    CGFloat sceneHeight = self.uiWindow.windowScene.coordinateSpace.bounds.size.height;
+    self.uiWindow.frame = CGRectMake(frame.origin.x, sceneHeight - CGRectGetMaxY(frame),
+                                     frame.size.width, frame.size.height);
+}
+
+- (void)setCollectionBehavior:(NSUInteger)behavior {
+    BOOL followed = self.bwFollowsScene;
+    _collectionBehavior = behavior;
+    BOOL follows = self.bwFollowsScene;
+    if (followed == follows) return;
+    CGRect frame = follows ? self.bwSceneBounds : self.requestedFrame;
+    // The vendor declares the role before ordering the window on screen.
+    // Apply that initial frame before emitting move/resize callbacks.
+    if (self.isVisible) [self updateDesktopFrame:frame display:YES];
+    else [self applyDesktopFrame:frame];
+}
+
 - (void)setContentView:(NSView*)view { _contentView=view; self.uiWindow.rootViewController.view=view; }
 - (void)setAllowsConcurrentViewDrawing:(BOOL)allow { self.uiWindow.layer.drawsAsynchronously=allow; }
 - (BOOL)allowsConcurrentViewDrawing { return self.uiWindow.layer.drawsAsynchronously; }
@@ -344,6 +1245,11 @@ void BWUIKitSetTextInputActive(BOOL active) {
     self.uiWindow.backgroundColor=[UIColor colorWithCGColor:cg];
 }
 - (void)setOpaque:(BOOL)opaque { self.uiWindow.opaque=opaque; }
+- (void)setAccessibilityElement:(BOOL)accessible { self.uiWindow.isAccessibilityElement=accessible; }
+- (void)setIgnoresMouseEvents:(BOOL)ignoresMouseEvents {
+    _ignoresMouseEvents = ignoresMouseEvents;
+    self.uiWindow.userInteractionEnabled = !ignoresMouseEvents;
+}
 - (BOOL)isOpaque { return self.uiWindow.opaque; }
 - (void)setHasShadow:(BOOL)shadow { self.uiWindow.layer.shadowOpacity=shadow?0.3:0;self.uiWindow.layer.shadowRadius=8; }
 - (BOOL)canBecomeKeyWindow { return (self.styleMask&9)!=0; }
@@ -371,20 +1277,39 @@ void BWUIKitSetTextInputActive(BOOL active) {
 
     // AppKit constrains the top edge in desktop (bottom-left) coordinates.
     CGFloat top = CGRectGetMaxY(frame);
-    if (self.styleMask & 8) frame.size.height = MIN(frame.size.height, CGRectGetHeight(visible));
+    if (self.styleMask & BWWindowResizable) frame.size.height = MIN(frame.size.height, CGRectGetHeight(visible));
     CGFloat minimumTop = CGRectGetMinY(visible) + MIN(frame.size.height, CGRectGetHeight(visible));
     frame.origin.y = MIN(MAX(top, minimumTop), CGRectGetMaxY(visible)) - frame.size.height;
     return frame;
 }
 - (CGSize)contentMinSize { return self.minSize; }
-- (void)setContentMinSize:(CGSize)size { self.minSize=size;self.uiWindow.windowScene.sizeRestrictions.minimumSize=size; }
+- (void)setContentMinSize:(CGSize)size { self.minSize=size;if(self.bwFollowsScene)self.uiWindow.windowScene.sizeRestrictions.minimumSize=size; }
 - (CGSize)contentMaxSize { return self.maxSize; }
-- (void)setContentMaxSize:(CGSize)size { self.maxSize=size;self.uiWindow.windowScene.sizeRestrictions.maximumSize=size; }
+- (void)setContentMaxSize:(CGSize)size { self.maxSize=size;if(self.bwFollowsScene)self.uiWindow.windowScene.sizeRestrictions.maximumSize=size; }
 - (void)setFrame:(CGRect)frame display:(BOOL)display {
-    if(self.styleMask&8)frame=self.uiWindow.windowScene.coordinateSpace.bounds;
+    CGRect bounds = self.bwSceneBounds;
+    self.requestedFrame = frame;
+    [self recordFullSceneRequest:frame];
+    if (self.bwFollowsScene && !CGRectIsEmpty(bounds)) frame = bounds;
+    [self updateDesktopFrame:frame display:display];
+}
+
+- (void)bwSyncSceneFrame {
+    CGRect bounds = self.bwSceneBounds;
+    if (self.bwFollowsScene && !CGRectIsEmpty(bounds) && !CGRectEqualToRect(self.desktopFrame, bounds))
+        [self updateDesktopFrame:bounds display:NO];
+}
+
+- (void)updateDesktopFrame:(CGRect)frame display:(BOOL)display {
     CGRect previous=self.desktopFrame;
-    self.desktopFrame=frame;
-    self.uiWindow.frame=CGRectMake(frame.origin.x,self.uiWindow.windowScene.coordinateSpace.bounds.size.height-CGRectGetMaxY(frame),frame.size.width,frame.size.height);
+#if BW_JUCE_EDITOR
+    if (self.detachedJucePopup)
+        frame = BWFlipJucePopupFrame(BWUpdateJucePopupFrame(self.detachedJucePopup, BWFlipJucePopupFrame(frame)));
+#endif
+    [self applyDesktopFrame:frame];
+#if BW_JUCE_EDITOR
+    if (self.detachedJucePopup) self.contentView.frame = (CGRect){CGPointZero, frame.size};
+#endif
     if(display) [self.uiWindow layoutIfNeeded];
     if(!CGPointEqualToPoint(previous.origin,frame.origin)&&[self.delegate respondsToSelector:@selector(windowDidMove:)])
         ((void(*)(id,SEL,id))objc_msgSend)(self.delegate,@selector(windowDidMove:),[NSNotification notificationWithName:@"NSWindowDidMoveNotification" object:self]);
@@ -392,17 +1317,107 @@ void BWUIKitSetTextInputActive(BOOL active) {
         ((void(*)(id,SEL,id))objc_msgSend)(self.delegate,@selector(windowDidResize:),[NSNotification notificationWithName:@"NSWindowDidResizeNotification" object:self]);
 }
 - (void)setContentSize:(CGSize)size { CGRect frame=self.frame; frame.size=size; [self setFrame:frame display:YES]; }
+- (BOOL)isMovable { return _movable && !self.bwFollowsScene; }
 - (void)setFrameOrigin:(CGPoint)origin { CGRect frame=self.frame;frame.origin=origin;[self setFrame:frame display:YES]; }
 - (void)setFrameTopLeftPoint:(CGPoint)point { CGRect frame=self.frame;frame.origin=CGPointMake(point.x,point.y-frame.size.height);[self setFrame:frame display:YES]; }
 - (NSScreen*)screen { return NSScreen.mainScreen; }
 - (CGFloat)backingScaleFactor { return self.uiWindow.screen.scale; }
 - (CGRect)convertRectToBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(scale,scale)); }
 - (CGRect)convertRectFromBacking:(CGRect)rect { CGFloat scale=self.backingScaleFactor;return CGRectApplyAffineTransform(rect,CGAffineTransformMakeScale(1/scale,1/scale)); }
-- (void)makeKeyAndOrderFront:(id)sender { BOOL wasKey=self.uiWindow.isKeyWindow;[self.uiWindow makeKeyAndVisible];if(wasKey)[(BWUIKitWindow*)self.uiWindow notifyKeyState:YES]; }
-- (void)orderFront:(id)sender { self.uiWindow.hidden=NO; }
-- (void)orderOut:(id)sender { self.uiWindow.hidden=YES; }
-- (void)close { self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self]; }
-- (BOOL)isVisible { return self.uiWindow && !self.uiWindow.hidden; }
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+- (BOOL)publishDetachedEditor {
+    if (self.detachedEditorPublisher) return YES;
+    if (self.uiWindow.windowScene || !BWIsEngineExtension()) return NO;
+    UIView *editor = BWDetachedEditorChild(self.contentView);
+    if (!editor) return NO;
+    __weak NSWindow *weakWindow = self;
+    self.detachedEditorPublisher = BWPublishDetachedEditorView(editor, ^{ [weakWindow performClose:nil]; });
+    if (self.detachedEditorPublisher) fprintf(stderr, "%s editor published %.0fx%.0f\n",
+                                              object_getClassName(editor), editor.bounds.size.width, editor.bounds.size.height);
+    return self.detachedEditorPublisher != nil;
+}
+- (void)stopPublishingDetachedEditor {
+    if (self.detachedEditorPublisher) BWStopPublishingDetachedEditor(self.detachedEditorPublisher);
+    self.detachedEditorPublisher = nil;
+}
+#endif
+#if BW_JUCE_EDITOR
+- (BOOL)publishDetachedJucePopup {
+    if (self.detachedJucePopup) return YES;
+    if (!self.excludedFromWindowsMenu || self.uiWindow.windowScene || !BWIsEngineExtension() ||
+        ![NSStringFromClass(self.class) hasPrefix:@"JUCEWindow_"]) return NO;
+    CGRect frame = BWFlipJucePopupFrame(self.desktopFrame);
+    self.detachedJucePopup = BWAttachJucePopup(self.contentView, &frame);
+    if (!self.detachedJucePopup) return NO;
+    self.uiWindow.rootViewController.view = [UIView new];
+    [self updateDesktopFrame:BWFlipJucePopupFrame(frame) display:NO];
+    return YES;
+}
+- (void)stopPublishingDetachedJucePopup {
+    BWDetachJucePopup(self.detachedJucePopup);
+    self.detachedJucePopup = nil;
+}
+#endif
+- (void)makeKeyAndOrderFront:(id)sender {
+    self.hasBeenShown=YES;
+#if BW_JUCE_EDITOR
+    if ([self publishDetachedJucePopup]) return;
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+    if ([self publishDetachedEditor]) return;
+#endif
+    BOOL wasKey=self.uiWindow.isKeyWindow;
+    [self.uiWindow makeKeyAndVisible];
+    if(wasKey)[(BWUIKitWindow*)self.uiWindow notifyKeyState:YES];
+}
+- (void)orderFront:(id)sender {
+    self.hasBeenShown=YES;
+#if BW_JUCE_EDITOR
+    if ([self publishDetachedJucePopup]) return;
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+    if ([self publishDetachedEditor]) return;
+#endif
+    self.uiWindow.hidden=NO;
+}
+- (void)orderFrontRegardless { [self orderFront:nil]; }
+- (void)orderOut:(id)sender {
+#if BW_JUCE_EDITOR
+    [self stopPublishingDetachedJucePopup];
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+    [self stopPublishingDetachedEditor];
+#endif
+    self.uiWindow.hidden=YES;
+}
+- (void)close {
+#if BW_JUCE_EDITOR
+    [self stopPublishingDetachedJucePopup];
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+    [self stopPublishingDetachedEditor];
+#endif
+    [self.contentView cancelActiveContacts]; self.uiWindow.hidden=YES; self.uiWindow=nil; [bitwigWindows removeObject:self];
+}
+- (void)performClose:(id)sender {
+    SEL shouldClose = @selector(windowShouldClose:);
+    if ([self.delegate respondsToSelector:shouldClose] &&
+        !((BOOL (*)(id, SEL, id))objc_msgSend)(self.delegate, shouldClose, self)) return;
+    [self close];
+}
+- (BOOL)isVisible {
+#if BW_JUCE_EDITOR
+    if (self.detachedJucePopup) return YES;
+#endif
+#if BW_VSTGUI_EDITOR || BW_IPLUG_EDITOR || BW_FABFILTER_EDITOR
+    if (self.detachedEditorPublisher) return YES;
+#endif
+    return self.uiWindow && !self.uiWindow.hidden;
+}
+- (BOOL)inLiveResize {
+    if (@available(iOS 26.0, *)) return self.uiWindow.windowScene.effectiveGeometry.isInteractivelyResizing;
+    return NO;
+}
 - (BOOL)isMiniaturized { return self.miniaturized; }
 - (BOOL)isZoomed { return CGRectEqualToRect(self.frame,self.uiWindow.windowScene.coordinateSpace.bounds); }
 - (void)zoom:(id)sender {
@@ -410,13 +1425,14 @@ void BWUIKitSetTextInputActive(BOOL active) {
     else {self.frameBeforeZoom=self.frame;[self setFrame:self.uiWindow.windowScene.coordinateSpace.bounds display:YES];}
 }
 - (void)miniaturize:(id)sender { self.miniaturized=YES;self.uiWindow.hidden=YES; }
-- (void)deminiaturize:(id)sender { self.miniaturized=NO;[self.uiWindow makeKeyAndVisible]; }
+- (void)deminiaturize:(id)sender { self.hasBeenShown=YES; self.miniaturized=NO; [self.uiWindow makeKeyAndVisible]; }
 - (BOOL)isKeyWindow { return self.uiWindow.keyWindow; }
 - (BOOL)makeFirstResponder:(UIResponder*)responder { return [responder becomeFirstResponder]; }
 - (CGRect)contentRectForFrameRect:(CGRect)rect { return rect; }
 - (CGRect)frameRectForContentRect:(CGRect)rect { return rect; }
 - (CGPoint)convertPointToScreen:(CGPoint)point { return CGPointMake(self.frame.origin.x+point.x,self.frame.origin.y+point.y); }
 - (CGPoint)convertPointFromScreen:(CGPoint)point { return CGPointMake(point.x-self.frame.origin.x,point.y-self.frame.origin.y); }
+- (CGPoint)mouseLocationOutsideOfEventStream { return [self convertPointFromScreen:mouseScreenLocation]; }
 - (CGRect)convertRectToScreen:(CGRect)rect { rect.origin=[self convertPointToScreen:rect.origin];return rect; }
 - (CGRect)convertRectFromScreen:(CGRect)rect { rect.origin=[self convertPointFromScreen:rect.origin];return rect; }
 - (CGPoint)convertBaseToScreen:(CGPoint)point { return [self convertPointToScreen:point]; }
@@ -425,8 +1441,17 @@ void BWUIKitSetTextInputActive(BOOL active) {
     draggingDesktopWindow=self;dragStartOrigin=self.frame.origin;dragStartScreen=[self convertPointToScreen:event.locationInWindow];
 }
 @end
-@interface NSPanel : NSWindow @end
-@implementation NSPanel @end
+@interface NSPanel : NSWindow
+@property(nonatomic, getter=isFloatingPanel) BOOL floatingPanel;
+@end
+@implementation NSPanel
+- (void)setFloatingPanel:(BOOL)floatingPanel {
+    if (_floatingPanel == floatingPanel) return;
+    _floatingPanel = floatingPanel;
+    if (floatingPanel && self.level == 0) self.level = 3;
+    else if (!floatingPanel && self.level == 3) self.level = 0;
+}
+@end
 
 @interface NSApplication : NSObject
 @property(nonatomic,weak) id delegate;
@@ -437,6 +1462,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic,strong) NSMutableArray<NSEvent*> *postedEvents;
 @end
 @implementation NSApplication
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)sharedApplication { if(!NSApp) NSApp=[self new]; return NSApp; }
 - (NSEvent*)currentEvent { return lastApplicationEvent; }
 - (NSEvent*)nextEventMatchingMask:(NSUInteger)mask untilDate:(NSDate*)date inMode:(NSString*)mode dequeue:(BOOL)dequeue {
@@ -475,7 +1501,13 @@ void BWUIKitSetTextInputActive(BOOL active) {
 - (BOOL)isRunning { return YES; }
 - (NSArray*)windows { return bitwigWindows.allObjects ?: @[]; }
 - (NSWindow*)keyWindow { for(NSWindow *window in self.windows)if(window.isKeyWindow)return window;return nil; }
-- (NSWindow*)mainWindow { return self.keyWindow; }
+- (NSWindow*)mainWindow {
+    NSWindow *key = self.keyWindow;
+    if (key.bwFollowsScene) return key;
+    for (NSWindow *window in self.windows)
+        if (window.isVisible && window.bwFollowsScene) return window;
+    return key;
+}
 - (NSWindow*)windowWithWindowNumber:(NSInteger)number { for(NSWindow *window in self.windows)if(window.windowNumber==number)return window;return nil; }
 - (void)activateIgnoringOtherApps:(BOOL)ignore {
     NSWindow *window=self.keyWindow ?: self.windows.firstObject;
@@ -502,20 +1534,74 @@ void BWUIKitSetTextInputActive(BOOL active) {
 
 @interface NSImage : NSObject
 @property(nonatomic,strong) UIImage *image;
+@property(nonatomic) CGSize preferredSize;
+@end
+@interface NSObject (BWImageRepresentation)
+- (CGImageRef)CGImage;
 @end
 @implementation NSImage
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithSize:(CGSize)size { if((self=[super init])){UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:size];_image=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context){}];}return self; }
 - (id)initWithContentsOfFile:(NSString*)path { if((self=[super init])) _image=[UIImage imageWithContentsOfFile:path]; return self; }
+- (id)initByReferencingFile:(NSString *)path { return [self initWithContentsOfFile:path]; }
 - (id)initWithData:(NSData*)data { if((self=[super init])) _image=[UIImage imageWithData:data]; return self; }
-- (CGSize)size { return self.image.size; }
+- (CGSize)size { return CGSizeEqualToSize(self.preferredSize, CGSizeZero) ? self.image.size : self.preferredSize; }
+- (void)setSize:(CGSize)size { self.preferredSize = size; }
+- (void)addRepresentation:(id)representation {
+    if (![representation respondsToSelector:@selector(CGImage)]) return;
+    CGImageRef image = [representation CGImage];
+    if (image) self.image = [UIImage imageWithCGImage:image];
+}
+- (CGImageRef)CGImageForProposedRect:(CGRect *)rect context:(id)context hints:(NSDictionary *)hints {
+    return self.image.CGImage;
+}
 @end
 @interface NSCursor : NSObject
 @property(nonatomic,strong) NSImage *image;
 @property(nonatomic) CGPoint hotSpot;
 @end
 @implementation NSCursor
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithImage:(NSImage*)image hotSpot:(CGPoint)point { if((self=[super init])){_image=image;_hotSpot=point;}return self; }
 + (instancetype)arrowCursor { static NSCursor *cursor;static dispatch_once_t once;dispatch_once(&once,^{cursor=[self new];});return cursor; }
++ (instancetype)pointingHandCursor {
+    static NSCursor *cursor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSImage *image = [NSImage new];
+        image.image = [[UIImage systemImageNamed:@"hand.point.up.left.fill"] imageWithTintColor:UIColor.whiteColor
+                                                                   renderingMode:UIImageRenderingModeAlwaysOriginal];
+        cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(2, 2)];
+    });
+    return cursor;
+}
++ (instancetype)resizeUpDownCursor {
+    static NSCursor *cursor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSImage *image = [NSImage new];
+        image.image = [[UIImage systemImageNamed:@"arrow.up.and.down"] imageWithTintColor:UIColor.whiteColor
+                                                             renderingMode:UIImageRenderingModeAlwaysOriginal];
+        cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(image.size.width / 2, image.size.height / 2)];
+    });
+    return cursor;
+}
++ (instancetype)IBeamCursor {
+    static NSCursor *cursor;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(9, 18)];
+        NSImage *image = [NSImage new];
+        image.image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+            [UIColor.blackColor setFill];
+            UIRectFill(CGRectMake(4, 1, 1, 16));
+            UIRectFill(CGRectMake(1, 1, 7, 1));
+            UIRectFill(CGRectMake(1, 16, 7, 1));
+        }];
+        cursor = [[self alloc] initWithImage:image hotSpot:CGPointMake(4, 9)];
+    });
+    return cursor;
+}
 - (void)set { cursorImage=self.image.image;cursorHotSpot=self.hotSpot;[hoveredView updateCursor]; }
 + (void)hide { cursorHideCount++;[hoveredView updateCursor]; }
 + (void)unhide { if(cursorHideCount)cursorHideCount--;[hoveredView updateCursor]; }
@@ -523,18 +1609,34 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @interface NSImageView : UIImageView @end
 @implementation NSImageView @end
 
+@protocol BWDeclaredPasteboard <NSObject>
+- (NSArray<NSString *> *)declaredTypes;
+- (id)declaredGeneration;
+- (NSData *)dataForType:(NSString *)type;
+- (NSString *)stringForType:(NSString *)type;
+@end
+
 @interface NSPasteboardItem : NSObject
+@property(nonatomic,weak) id<BWDeclaredPasteboard> declaredBoard;
+@property(nonatomic,strong) id declaredGeneration;
+@property(nonatomic) BOOL followsDeclaredTypes;
 @property(nonatomic,strong) NSMutableDictionary<NSString*,id> *representations;
 @property(nonatomic,strong) UIPasteboard *source;
 @property(nonatomic) NSUInteger sourceIndex;
 @end
 @implementation NSPasteboardItem
+BW_TRACE_MISSING_SELECTOR
 - (id)init { if((self=[super init]))_representations=[NSMutableDictionary new];return self; }
 - (NSArray<NSString*>*)types {
+    if(self.declaredGeneration != self.declaredBoard.declaredGeneration)return @[];
+    if(self.followsDeclaredTypes)return self.declaredBoard.declaredTypes;
     if(self.source)return [self.source pasteboardTypesForItemSet:[NSIndexSet indexSetWithIndex:self.sourceIndex]].firstObject?:@[];
     return self.representations.allKeys;
 }
 - (NSData*)dataForType:(NSString*)type {
+    if(self.declaredGeneration != self.declaredBoard.declaredGeneration)return nil;
+    if(self.followsDeclaredTypes)
+        return [self.declaredBoard.declaredTypes containsObject:type] ? [self.declaredBoard dataForType:type] : nil;
     if(self.source)return [self.source dataForPasteboardType:type inItemSet:[NSIndexSet indexSetWithIndex:self.sourceIndex]].firstObject;
     id value=self.representations[type];
     if([value isKindOfClass:NSData.class])return value;
@@ -542,6 +1644,9 @@ void BWUIKitSetTextInputActive(BOOL active) {
     return nil;
 }
 - (NSString*)stringForType:(NSString*)type {
+    if(self.declaredGeneration != self.declaredBoard.declaredGeneration)return nil;
+    if(self.followsDeclaredTypes)
+        return [self.declaredBoard.declaredTypes containsObject:type] ? [self.declaredBoard stringForType:type] : nil;
     id value=self.source?[self.source valuesForPasteboardType:type inItemSet:[NSIndexSet indexSetWithIndex:self.sourceIndex]].firstObject:self.representations[type];
     if([value isKindOfClass:NSString.class])return value;
     if([value isKindOfClass:NSData.class])return [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
@@ -551,11 +1656,19 @@ void BWUIKitSetTextInputActive(BOOL active) {
 - (BOOL)setString:(NSString*)string forType:(NSString*)type { if(!string||!type)return NO;self.representations[type]=string;return YES; }
 @end
 
-@interface NSPasteboard : NSObject
+@interface NSPasteboard : NSObject <BWDeclaredPasteboard>
 @property(nonatomic,strong) UIPasteboard *pasteboard;
 @property(nonatomic,copy) NSString *logicalName;
+@property(nonatomic,copy) NSArray<NSString *> *declaredTypes;
+@property(nonatomic,strong) id declaredGeneration;
+@property(nonatomic,weak) id declaredOwner;
+@property(nonatomic,strong) NSMutableDictionary<NSString *, id> *declaredValues;
+@property(nonatomic,strong) NSMutableSet<NSString *> *providingTypes;
+@property(nonatomic,strong) NSMutableArray<NSPasteboardItem *> *declaredAdditionalItems;
+@property(nonatomic) NSInteger backingCountAdjustment;
 @end
 @implementation NSPasteboard
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)generalPasteboard { return [self pasteboardWithName:NSPasteboardNameGeneral]; }
 + (instancetype)pasteboardWithName:(NSString*)name {
     static NSMutableDictionary *boards; if(!boards)boards=[NSMutableDictionary new];
@@ -573,11 +1686,28 @@ void BWUIKitSetTextInputActive(BOOL active) {
     return board;
 }
 - (NSString*)name { return self.logicalName; }
-- (NSArray<NSString*>*)types { return self.pasteboard.pasteboardTypes; }
+- (NSArray<NSString*>*)types {
+    if(!self.declaredTypes)return self.pasteboard.pasteboardTypes;
+    NSMutableOrderedSet *types = [NSMutableOrderedSet orderedSetWithArray:self.declaredTypes];
+    for(NSPasteboardItem *item in self.declaredAdditionalItems)
+        [types addObjectsFromArray:item.types];
+    return types.array;
+}
 - (NSArray<NSPasteboardItem*>*)pasteboardItems {
     NSMutableArray *items=[NSMutableArray new];
     // Bitwig polls item types. Keep content lazy so polling does not request
     // cross-application paste permission before the user actually pastes.
+    if(self.declaredTypes.count) {
+        NSPasteboardItem *first=[NSPasteboardItem new];
+        first.declaredBoard=self;
+        first.declaredGeneration=self.declaredGeneration;
+        first.followsDeclaredTypes=YES;
+        [items addObject:first];
+    }
+    if(self.declaredGeneration) {
+        [items addObjectsFromArray:self.declaredAdditionalItems];
+        return items;
+    }
     for(NSUInteger index=0;index<self.pasteboard.numberOfItems;index++){
         NSPasteboardItem *item=[NSPasteboardItem new];
         item.source=self.pasteboard;item.sourceIndex=index;
@@ -585,17 +1715,103 @@ void BWUIKitSetTextInputActive(BOOL active) {
     }
     return items;
 }
-- (NSInteger)changeCount { return self.pasteboard.changeCount; }
-- (NSInteger)clearContents { self.pasteboard.items=@[]; return self.pasteboard.changeCount; }
-- (BOOL)setString:(NSString*)text forType:(NSString*)type { if(!text||!type)return NO;[self.pasteboard setValue:text forPasteboardType:type];return YES; }
+- (NSInteger)changeCount { return self.pasteboard.changeCount - self.backingCountAdjustment; }
+- (void)resetBackingItems {
+    NSInteger before = self.pasteboard.changeCount;
+    self.pasteboard.items = @[];
+    self.backingCountAdjustment += self.pasteboard.changeCount - before - 1;
+}
+- (void)notifyPreviousOwner:(id)owner {
+    SEL changed = @selector(pasteboardChangedOwner:);
+    if(owner != self.declaredOwner && [owner respondsToSelector:changed]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ((void(*)(id,SEL,id))objc_msgSend)(owner,changed,self);
+        });
+    }
+}
+- (NSInteger)clearContents {
+    id previous = self.declaredOwner;
+    self.declaredOwner = nil;
+    self.declaredTypes = nil;
+    self.declaredGeneration = nil;
+    self.declaredValues = nil;
+    self.providingTypes = nil;
+    self.declaredAdditionalItems = nil;
+    [self resetBackingItems];
+    [self notifyPreviousOwner:previous];
+    return self.changeCount;
+}
+- (NSInteger)declareTypes:(NSArray<NSString *> *)types owner:(id)owner {
+    BWCompatibilityTrace("bridge", "NSPasteboard", "declareTypes:owner:",
+                         owner ? "declared_with_owner" : "declared_eager");
+    id previous = self.declaredOwner;
+    [self resetBackingItems];
+    self.declaredTypes = [NSOrderedSet orderedSetWithArray:types ?: @[]].array;
+    self.declaredGeneration = [NSObject new];
+    self.declaredOwner = owner;
+    self.declaredValues = [NSMutableDictionary new];
+    self.providingTypes = [NSMutableSet new];
+    self.declaredAdditionalItems = [NSMutableArray new];
+    [self notifyPreviousOwner:previous];
+    return self.changeCount;
+}
+- (BOOL)setDeclaredValue:(id)value forType:(NSString *)type {
+    if(![self.declaredTypes containsObject:type])
+        self.declaredTypes = [self.declaredTypes arrayByAddingObject:type];
+    self.declaredValues[type] = value;
+    return YES;
+}
+- (id)declaredValueForType:(NSString *)type {
+    if(!type || ![self.declaredTypes containsObject:type]) return nil;
+    id value = self.declaredValues[type];
+    id owner = self.declaredOwner;
+    SEL provide = @selector(pasteboard:provideDataForType:);
+    NSMutableSet *requests = self.providingTypes;
+    if(!value && ![requests containsObject:type] && [owner respondsToSelector:provide]) {
+        [requests addObject:type];
+        @try {
+            ((void(*)(id,SEL,id,id))objc_msgSend)(owner,provide,self,type);
+        } @finally {
+            [requests removeObject:type];
+        }
+        if(requests != self.providingTypes)return nil;
+        value = self.declaredValues[type];
+    }
+    return value;
+}
+- (BOOL)setString:(NSString*)text forType:(NSString*)type {
+    if(!text||!type)return NO;
+    if(self.declaredTypes)return [self setDeclaredValue:text forType:type];
+    [self.pasteboard setValue:text forPasteboardType:type];return YES;
+}
 - (NSString*)stringForType:(NSString*)type {
-    id value=[self.pasteboard valueForPasteboardType:type];
+    if(self.declaredGeneration && ![self.declaredTypes containsObject:type]) {
+        for(NSPasteboardItem *item in self.declaredAdditionalItems)
+            if([item.types containsObject:type]) return [item stringForType:type];
+        return nil;
+    }
+    id value=[self.declaredTypes containsObject:type]?[self declaredValueForType:type]:[self.pasteboard valueForPasteboardType:type];
     if([value isKindOfClass:NSString.class])return value;
     if([value isKindOfClass:NSData.class])return [[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding];
     return nil;
 }
-- (NSData*)dataForType:(NSString*)type { return [self.pasteboard dataForPasteboardType:type]; }
-- (BOOL)setData:(NSData*)data forType:(NSString*)type { if(!data||!type)return NO;[self.pasteboard setData:data forPasteboardType:type];return YES; }
+- (NSData*)dataForType:(NSString*)type {
+    if(self.declaredGeneration && ![self.declaredTypes containsObject:type]) {
+        for(NSPasteboardItem *item in self.declaredAdditionalItems)
+            if([item.types containsObject:type]) return [item dataForType:type];
+        return nil;
+    }
+    if(![self.declaredTypes containsObject:type])return [self.pasteboard dataForPasteboardType:type];
+    id value=[self declaredValueForType:type];
+    if([value isKindOfClass:NSData.class])return value;
+    if([value isKindOfClass:NSString.class])return [value dataUsingEncoding:NSUTF8StringEncoding];
+    return nil;
+}
+- (BOOL)setData:(NSData*)data forType:(NSString*)type {
+    if(!data||!type)return NO;
+    if(self.declaredTypes)return [self setDeclaredValue:data forType:type];
+    [self.pasteboard setData:data forPasteboardType:type];return YES;
+}
 - (BOOL)writeObjects:(NSArray<NSPasteboardItem*>*)objects {
     NSMutableArray *items=[NSMutableArray new];
     for(NSPasteboardItem *item in objects){
@@ -603,7 +1819,18 @@ void BWUIKitSetTextInputActive(BOOL active) {
         for(NSString *type in item.types){NSData *data=[item dataForType:type];if(data)values[type]=data;}
         [items addObject:values];
     }
-    [self.pasteboard addItems:items];return YES;
+    if(self.declaredGeneration) {
+        for(NSDictionary *values in items) {
+            NSPasteboardItem *item = [NSPasteboardItem new];
+            item.declaredBoard = self;
+            item.declaredGeneration = self.declaredGeneration;
+            [item.representations addEntriesFromDictionary:values];
+            [self.declaredAdditionalItems addObject:item];
+        }
+        return YES;
+    }
+    [self.pasteboard addItems:items];
+    return YES;
 }
 @end
 
@@ -621,6 +1848,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 
 @interface NSWorkspace : NSObject @end
 @implementation NSWorkspace
+BW_TRACE_MISSING_SELECTOR
 + (instancetype)sharedWorkspace { static id workspace; if(!workspace) workspace=[self new]; return workspace; }
 - (NSNotificationCenter*)notificationCenter { return NSNotificationCenter.defaultCenter; }
 - (NSRunningApplication*)frontmostApplication {
@@ -646,6 +1874,7 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic) NSInteger tag;
 @end
 @implementation NSMenuItem
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithTitle:(NSString*)title action:(SEL)action keyEquivalent:(NSString*)key {
     if((self=[super init])) {_title=[title copy];_action=action;_keyEquivalent=[key copy];_enabled=YES;}return self;
 }
@@ -659,7 +1888,65 @@ void BWUIKitSetTextInputActive(BOOL active) {
 @property(nonatomic,weak) id delegate;
 - (UIMenu*)uiMenu;
 @end
+#if BW_FABFILTER_EDITOR
+#import "fabfilter/Menu.h"
+
+static NSArray<NSDictionary *> *BWFabFilterMenuItems(NSMenu *menu, NSMutableArray<NSMenuItem *> *retained,
+                                                     NSHashTable<NSMenu *> *ancestors) {
+    if ([ancestors containsObject:menu]) return @[];
+    [ancestors addObject:menu];
+    NSMutableArray *items = [NSMutableArray new];
+    for (NSMenuItem *item in menu.items.copy) {
+        if (item.hidden) continue;
+        if (item.separatorItem) {
+            [items addObject:@{@"separator":@YES}];
+            continue;
+        }
+        NSUInteger index = retained.count;
+        [retained addObject:item];
+        NSMutableDictionary *entry = [@{@"index":@(index), @"title":item.title ?: @"",
+                                         @"enabled":@(item.enabled), @"state":@(item.state)} mutableCopy];
+        if (item.submenu) {
+            entry[@"children"] = BWFabFilterMenuItems(item.submenu, retained, ancestors);
+            if (![entry[@"children"] count]) entry[@"enabled"] = @NO;
+        }
+        [items addObject:entry];
+    }
+    [ancestors removeObject:menu];
+    return items;
+}
+#endif
+
 @implementation NSMenu
+BW_TRACE_MISSING_SELECTOR
+#if BW_FABFILTER_EDITOR
+- (BOOL)popUpMenuPositioningItem:(NSMenuItem *)positioningItem atLocation:(CGPoint)point inView:(UIView *)view {
+    if (!BWIsEngineExtension() || !BWIsDetachedEditor(view)) return NO;
+    NSMutableArray<NSMenuItem *> *retained = [NSMutableArray new];
+    NSArray *items = BWFabFilterMenuItems(self, retained, [NSHashTable hashTableWithOptions:NSPointerFunctionsObjectPointerPersonality]);
+    NSUInteger index = positioningItem ? [retained indexOfObjectIdenticalTo:positioningItem] : NSNotFound;
+    NSInteger selection = -1;
+    if (!BWRunFabFilterMenu(view, point, items, index == NSNotFound ? nil : @(index), &selection) ||
+        (NSUInteger)selection >= retained.count) return NO;
+
+    NSMenuItem *item = retained[(NSUInteger)selection];
+    SEL action = item.action;
+    if (!action || !item.enabled || item.hidden || item.submenu || item.separatorItem) return NO;
+    id target = item.target;
+    if (!target) {
+        for (UIResponder *responder = view; responder; responder = responder.nextResponder) {
+            if (![responder respondsToSelector:action]) continue;
+            target = responder;
+            break;
+        }
+        if (!target && [NSApp respondsToSelector:action]) target = NSApp;
+        if (!target && [[NSApp delegate] respondsToSelector:action]) target = [NSApp delegate];
+    }
+    if (![target respondsToSelector:action]) return NO;
+    ((void (*)(id, SEL, id))objc_msgSend)(target, action, item);
+    return YES;
+}
+#endif
 - (id)initWithTitle:(NSString*)title { if((self=[super init])){_title=[title copy];_items=[NSMutableArray new];}return self; }
 - (NSArray*)itemArray { return self.items.copy; }
 - (NSInteger)numberOfItems { return self.items.count; }
@@ -698,6 +1985,7 @@ void BWUIKitBuildMenu(id<UIMenuBuilder> builder) {
 
 // Explicitly enabled development input, confined to our Bitwig windows. This
 // exercises the original mouse handlers; it is not a hardware-touch test.
+
 void BWUIKitPollTestInput(void) {
     NSString *documents=NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,NSUserDomainMask,YES).firstObject;
     NSString *path=[documents stringByAppendingPathComponent:@"native-ui-command.json"];
@@ -710,7 +1998,13 @@ void BWUIKitPollTestInput(void) {
     for(NSWindow *window in bitwigWindows){
         if(window.uiWindow.hidden)continue;
         CGRect frame=window.uiWindow.frame;
-        [windows addObject:@{@"title":window.title?:@"",@"key":@(window.uiWindow.isKeyWindow),@"frame":@[@(frame.origin.x),@(frame.origin.y),@(frame.size.width),@(frame.size.height)]}];
+        CGRect requested = window.requestedFrame, initial = window.initialFrame;
+        [windows addObject:@{@"title":window.title?:@"", @"key":@(window.uiWindow.isKeyWindow),
+                             @"class":NSStringFromClass(window.class), @"style":@(window.styleMask),
+                             @"collection":@(window.collectionBehavior), @"full_scene":@(window.bwFollowsScene),
+                             @"initial_frame":@[@(initial.origin.x), @(initial.origin.y), @(initial.size.width), @(initial.size.height)],
+                             @"requested_frame":@[@(requested.origin.x), @(requested.origin.y), @(requested.size.width), @(requested.size.height)],
+                             @"frame":@[@(frame.origin.x), @(frame.origin.y), @(frame.size.width), @(frame.size.height)]}];
         if(window.uiWindow.isKeyWindow)target=window;
     }
     if([command[@"action"] isEqual:@"click"]){
@@ -765,27 +2059,133 @@ void BWUIKitPollTestInput(void) {
     [encoded writeToFile:[documents stringByAppendingPathComponent:@"native-ui-result.json"] atomically:YES];
 }
 
-// These types are referenced by the native image. Their operations are not yet
-// implemented; any attempted unsupported selector raises the standard exception.
-#define DECLARE_PENDING_CLASS(NAME, BASE) @interface NAME : BASE @end @implementation NAME @end
-DECLARE_PENDING_CLASS(NSSavePanel, NSPanel)
+static NSURL *BWProjectSaveDirectory(NSURL *requested) {
+    NSURL *container=BWSharedContainerURL();
+    if(!container)container=[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *user=[container URLByAppendingPathComponent:@"BitwigUser" isDirectory:YES];
+    NSURL *projects=[user URLByAppendingPathComponent:@"Projects" isDirectory:YES];
+    if(!requested.isFileURL)return projects;
+    NSString *root=user.URLByResolvingSymlinksInPath.path;
+    NSString *path=requested.URLByResolvingSymlinksInPath.path;
+    if([path isEqualToString:root]||[path hasPrefix:[root stringByAppendingString:@"/"]])return requested;
+    return projects;
+}
+
+@interface NSSavePanel : NSPanel
+@property(nonatomic) BOOL canCreateDirectories,canSelectHiddenExtension,floatingPanel,allowsOtherFileTypes;
+@property(nonatomic,copy) NSArray<NSString*> *allowedFileTypes;
+@property(nonatomic,copy) NSString *nameFieldStringValue;
+@property(nonatomic,strong) NSURL *directoryURL;
+@property(nonatomic,strong,readonly) NSURL *URL;
+@end
+@implementation NSSavePanel
+- (instancetype)init {
+    if((self=[super init])) _canCreateDirectories=YES;
+    return self;
+}
++ (instancetype)savePanel { return [self new]; }
+- (void)beginWithCompletionHandler:(void(^)(NSInteger))completion {
+    NSWindow *window=[NSApp keyWindow];
+    UIViewController *presenter=window.uiWindow.rootViewController;
+    while(presenter.presentedViewController)presenter=presenter.presentedViewController;
+    NSURL *directory=BWProjectSaveDirectory(self.directoryURL);
+    if(!presenter||!directory){completion(0);return;}
+    NSError *error=nil;
+    if(![NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:&error]){
+        UIAlertController *alert=[UIAlertController alertControllerWithTitle:@"Could not open save location" message:error.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action){completion(0);}]];
+        [presenter presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    NSString *location=directory.lastPathComponent;
+    UIAlertController *alert=[UIAlertController alertControllerWithTitle:self.title.length?self.title:@"Save"
+        message:location preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *field){
+        field.text=self.nameFieldStringValue;
+        field.clearButtonMode=UITextFieldViewModeWhileEditing;
+    }];
+    UITextField *field=alert.textFields.firstObject;
+    __weak UIAlertController *weakAlert=alert;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(__unused UIAlertAction *action){completion(0);}]];
+    void (^accept)(UIAlertAction *)=^(__unused UIAlertAction *action){
+        NSString *name=[weakAlert.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        self.nameFieldStringValue=name;
+        id delegate=self.delegate;
+        SEL selector=@selector(panel:userEnteredFilename:confirmed:);
+        if([delegate respondsToSelector:selector])
+            name=((NSString*(*)(id,SEL,id,NSString*,BOOL))objc_msgSend)(delegate,selector,self,name,YES);
+        if(name.length)_URL=[directory URLByAppendingPathComponent:name isDirectory:NO];
+        completion(_URL?1:0);
+    };
+    UIAlertAction *save=[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:accept];
+    UIAlertAction *replace=[UIAlertAction actionWithTitle:@"Replace Existing Project" style:UIAlertActionStyleDestructive handler:accept];
+    [alert addAction:save];
+    [alert addAction:replace];
+    __weak UIAlertAction *weakSave=save;
+    __weak UIAlertAction *weakReplace=replace;
+    void (^validate)(void)=^{
+        UIAlertController *active=weakAlert;
+        NSString *name=[active.textFields.firstObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        BOOL valid=name.length&&![name isEqualToString:@"."]&&![name isEqualToString:@".."]&&
+            [name rangeOfString:@"/"].location==NSNotFound;
+        BOOL exists=NO;
+        if(valid){
+            // Bitwig may append the project extension after the native panel returns.
+            NSURL *item=[directory URLByAppendingPathComponent:name];
+            NSURL *project=[directory URLByAppendingPathComponent:[name stringByAppendingPathExtension:@"bwproject"]];
+            exists=[NSFileManager.defaultManager fileExistsAtPath:item.path]||
+                [NSFileManager.defaultManager fileExistsAtPath:project.path];
+        }
+        active.message=exists?[NSString stringWithFormat:@"A project with this name already exists in %@.",location]:location;
+        weakSave.enabled=valid&&!exists;
+        weakReplace.enabled=exists;
+    };
+    [field addAction:[UIAction actionWithHandler:^(__unused UIAction *action){validate();}] forControlEvents:UIControlEventEditingChanged];
+    validate();
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+@end
 
 
 // Native asynchronous Files picker. Imported files live in the shared container
 // so both the frontend and the sandboxed audio engine can read them.
-@interface NSOpenPanel : NSPanel <UIDocumentPickerDelegate>
-@property BOOL allowsMultipleSelection,canChooseDirectories,canChooseFiles,allowsOtherFileTypes,canSelectHiddenExtension,floatingPanel;
-@property(copy) NSArray<NSString*> *allowedFileTypes;
-@property(copy) NSString *nameFieldStringValue;
-@property(strong) NSURL *directoryURL;
+@interface NSOpenPanel : NSSavePanel <UIDocumentPickerDelegate>
+@property BOOL allowsMultipleSelection,canChooseDirectories,canChooseFiles;
+#if BW_IPLUG_EDITOR
+@property BOOL resolvesAliases;
+#endif
 @property(copy) NSArray<NSURL*> *URLs;
 @property(copy) void (^completion)(NSInteger);
 @property(strong) UIDocumentPickerViewController *picker;
 @end
 @implementation NSOpenPanel
-+ (id)openPanel { NSOpenPanel *panel=[self new];panel.canChooseFiles=YES;return panel; }
+- (instancetype)init {
+    if((self=[super init])) {
+        self.canCreateDirectories=NO;
+        _canChooseFiles=YES;
+    }
+    return self;
+}
++ (id)openPanel { return [self new]; }
 - (NSURL*)URL { return self.URLs.firstObject; }
+#if BW_IPLUG_EDITOR
+- (NSString *)filename { return self.URL.path; }
+- (void)beginSheetModalForWindow:(NSWindow *)window completionHandler:(void (^)(NSInteger))completion {
+    if (BWIsEngineExtension()) {
+        extern BOOL BWNAMRequestOpenPanel(NSString *, void (^)(NSURL *));
+        self.completion = completion;
+        if (!BWNAMRequestOpenPanel(self.allowedFileTypes.firstObject, ^(NSURL *file) {
+            [self finishWithURLs:file ? @[file] : @[]];
+        })) [self finishWithURLs:@[]];
+        return;
+    }
+    [self beginWithCompletionHandler:completion];
+}
+#endif
 - (void)beginWithCompletionHandler:(void(^)(NSInteger))completion {
+    BWCompatibilityTrace("bridge", "NSOpenPanel", "beginWithCompletionHandler:", "opened");
+    BWCompatibilityTrace("bridge", "NSOpenPanel", "canCreateDirectories",
+                         self.canCreateDirectories ? "requested_true_files_controls_ui" : "requested_false_files_controls_ui");
     NSLog(@"Native file picker opened files=%d directories=%d multiple=%d",self.canChooseFiles,self.canChooseDirectories,self.allowsMultipleSelection);
     self.completion=completion;
     NSMutableArray<UTType*> *types=[NSMutableArray new];
@@ -804,6 +2204,7 @@ DECLARE_PENDING_CLASS(NSSavePanel, NSPanel)
     [presenter presentViewController:self.picker animated:YES completion:nil];
 }
 - (void)finishWithURLs:(NSArray<NSURL*>*)urls {
+    BWCompatibilityTrace("bridge", "NSOpenPanel", "finishWithURLs:", urls.count ? "selected" : "no_selection");
     NSLog(@"Native file picker completed count=%lu",(unsigned long)urls.count);
     self.URLs=urls;void(^completion)(NSInteger)=self.completion;self.completion=nil;
     self.picker.delegate=nil;self.picker=nil;
@@ -813,7 +2214,7 @@ DECLARE_PENDING_CLASS(NSSavePanel, NSPanel)
 - (void)documentPicker:(UIDocumentPickerViewController*)controller didPickDocumentsAtURLs:(NSArray<NSURL*>*)urls {
     NSLog(@"Native file picker selected count=%lu",(unsigned long)urls.count);
     NSMutableArray *imported=[NSMutableArray new];NSError *error=nil;
-    NSURL *group=[NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:@"group.org.example.bitwigipad"];
+    NSURL *group=BWSharedContainerURL();
     if(!group)group=[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *destination=[[group URLByAppendingPathComponent:@"BitwigUser/Imports"] URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
     [NSFileManager.defaultManager createDirectoryAtURL:destination withIntermediateDirectories:YES attributes:nil error:&error];
@@ -835,6 +2236,29 @@ DECLARE_PENDING_CLASS(NSSavePanel, NSPanel)
 }
 @end
 
+#if BW_IPLUG_EDITOR
+id BWNAMPresentOpenPanel(NSString *extension, void (^complete)(NSURL *)) {
+    if (!([extension isEqualToString:@"nam"] || [extension isEqualToString:@"wav"])) {
+        complete(nil);
+        return nil;
+    }
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.allowedFileTypes = @[extension];
+    __weak NSOpenPanel *weakPanel = panel;
+    [panel beginWithCompletionHandler:^(NSInteger result) {
+        complete(result ? weakPanel.URL : nil);
+    }];
+    return panel.picker ? panel : nil;
+}
+
+void BWNAMCancelOpenPanel(NSOpenPanel *panel) {
+    panel.completion = nil;
+    panel.picker.delegate = nil;
+    [panel.picker dismissViewControllerAnimated:YES completion:nil];
+    panel.picker = nil;
+}
+#endif
+
 BOOL NSPointInRect(CGPoint point, CGRect rect) { return CGRectContainsPoint(rect,point); }
 BOOL NSApplicationLoad(void) { [NSApplication sharedApplication]; return YES; }
 CFTypeRef CFMakeCollectable(CFTypeRef value) { return value; } // GC is disabled on iOS.
@@ -847,6 +2271,7 @@ CFTypeRef CFMakeCollectable(CFTypeRef value) { return value; } // GC is disabled
 @property(nonatomic,strong) id imageContents;
 @end
 @implementation NSDraggingItem
+BW_TRACE_MISSING_SELECTOR
 - (id)initWithPasteboardWriter:(id)writer { if((self=[super init]))_item=writer;return self; }
 - (void)setDraggingFrame:(CGRect)frame contents:(id)contents { self.draggingFrame=frame;self.imageContents=contents; }
 @end
@@ -863,6 +2288,7 @@ CFTypeRef CFMakeCollectable(CFTypeRef value) { return value; } // GC is disabled
 @property(nonatomic) NSInteger draggingFormation;
 @end
 @implementation NSDraggingSession
+BW_TRACE_MISSING_SELECTOR
 - (NSInteger)numberOfValidItemsForDrop { return self.items.count; }
 @end
 static NSDraggingSession *activeDrag;

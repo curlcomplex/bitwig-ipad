@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """Build/run Amethyst's iOS Java 25 runtime in the isolated iPad simulator."""
-import json
+import argparse
 import plistlib
 import shutil
 import subprocess
 from pathlib import Path
-ROOT=Path(__file__).resolve().parents[1]
-APP=ROOT/'build/native-java/BitwigJavaProbe.app'
+from bitwig_source import BitwigSource, ROOT, java_probe_info
+
+from local_config import build_identity, jni_include_paths, selected_simulator, simulator_argument
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--run', action='store_true', help='Install and launch the built Simulator probe')
+simulator_argument(parser)
+bitwig = BitwigSource(parser)
+simulator = selected_simulator(parser, bitwig.args.simulator) if bitwig.args.run else None
+identity = build_identity(parser)
+jni_headers = jni_include_paths(parser)
+APP = bitwig.build / 'native-java/BitwigJavaProbe.app'
 APP.mkdir(parents=True,exist_ok=True)
 source=ROOT/'vendor/java25-ios'
 runtime=APP/'jre'
@@ -22,13 +32,14 @@ for path in runtime.rglob('*'):
         run('xcrun','vtool','-set-build-version','iossim','17.0','27.2','-replace','-output',path,path)
         run('codesign','--force','--sign','-',path)
 for name in ['bitwig.jar','libs.jar']:
-    shutil.copy2(Path('/Applications/Bitwig Studio 6.1.4.app/Contents/Java')/name,APP/name)
+    shutil.copy2((bitwig.contents / 'Java')/name,APP/name)
 sdk=subprocess.check_output(['xcrun','--sdk','iphonesimulator','--show-sdk-path'],text=True).strip()
-run('xcrun','--sdk','iphonesimulator','clang','-target','arm64-apple-ios17.0-simulator','-isysroot',sdk,'-fobjc-arc','-g','-I/opt/homebrew/opt/openjdk/include','-framework','UIKit','-framework','Foundation',ROOT/'probe/native-java.m','-o',APP/'BitwigJavaProbe')
-info={'CFBundleIdentifier':'org.example.bitwigipad.javaprobe','CFBundleExecutable':'BitwigJavaProbe','CFBundleName':'Bitwig Java Probe','CFBundlePackageType':'APPL','CFBundleVersion':'1','CFBundleShortVersionString':'0.1','MinimumOSVersion':'17.0','UIDeviceFamily':[2],'UILaunchScreen':{},'UIApplicationSceneManifest':{'UIApplicationSupportsMultipleScenes':False,'UISceneConfigurations':{'UIWindowSceneSessionRoleApplication':[{'UISceneConfigurationName':'Probe','UISceneDelegateClassName':'JavaProbeScene'}]}}}
+run('xcrun','--sdk','iphonesimulator','clang','-target','arm64-apple-ios17.0-simulator','-isysroot',sdk,'-fobjc-arc','-g',*[f'-I{path}' for path in jni_headers],'-framework','UIKit','-framework','Foundation',ROOT/'probe/native-java.m','-o',APP/'BitwigJavaProbe')
+info = java_probe_info(identity)
 (APP/'Info.plist').write_bytes(plistlib.dumps(info))
 run('codesign','--force','--sign','-',APP)
-udid=json.loads((ROOT/'evidence/simulator.json').read_text())['udid']
-run('xcrun','simctl','install',udid,APP)
-subprocess.run(['xcrun','simctl','terminate',udid,info['CFBundleIdentifier']],capture_output=True)
-run('xcrun','simctl','launch',udid,info['CFBundleIdentifier'])
+print(APP)
+if simulator:
+    subprocess.run(['xcrun','simctl','terminate',simulator,info['CFBundleIdentifier']],capture_output=True)
+    run('xcrun','simctl','install',simulator,APP)
+    run('xcrun','simctl','launch',simulator,info['CFBundleIdentifier'])

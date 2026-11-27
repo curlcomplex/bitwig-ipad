@@ -2,13 +2,18 @@
 """Adapt a COPY of the real ARM64 audio engine for an isolated iOS loader check."""
 import argparse, json, plistlib, re, shutil, struct, subprocess
 from pathlib import Path
+from bitwig_source import BitwigSource, ENGINE, ROOT, sha256
 
-root=Path(__file__).resolve().parents[1]
-parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--device',action='store_true');args=parser.parse_args()
-build=root/('build/native-engine-probe-device' if args.device else 'build/native-engine-probe')
+from local_config import build_identity
+
+root=ROOT
+parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--device',action='store_true');bitwig=BitwigSource(parser);args=bitwig.args
+identity = build_identity(parser, args.device)
+build=bitwig.build/('native-engine-probe-device' if args.device else 'native-engine-probe')
 app=build/'BitwigEngineProbe.app'
 frameworks=app/'Frameworks';frameworks.mkdir(parents=True,exist_ok=True)
-source=Path('/Applications/Bitwig Studio 6.1.4.app/Contents/MacOS/Bitwig Audio Engine ARM64-NEON.app/Contents/MacOS/BitwigAudioEngine-ARM64-NEON')
+source=bitwig.contents / ENGINE
+source_identity = bitwig.identity(ENGINE)
 def run(*args):subprocess.run(list(map(str,args)),check=True)
 sdk_name='iphoneos' if args.device else 'iphonesimulator'
 target='arm64-apple-ios17.0'+('' if args.device else '-simulator')
@@ -66,17 +71,22 @@ run(*cc,'-fobjc-arc','-dynamiclib',root/'native/compat/AppKit.m',root/'native/co
 for fw in ['AppKit','Cocoa','Carbon','CoreServices','CoreGraphics','CoreVideo']:
     bridge=frameworks/f'lib{fw}Bridge.dylib'
     run(*cc,'-dynamiclib',root/'native/compat/Forward.c',f'-Wl,-reexport_library,{compat}','-Wl,-rpath,@loader_path','-install_name',f'@rpath/{bridge.name}','-o',bridge)
-info={'CFBundleIdentifier':'org.example.bitwigipad.engineprobe','CFBundleExecutable':'BitwigEngineProbe','CFBundleName':'Bitwig Engine Probe','CFBundlePackageType':'APPL','CFBundleVersion':'1','CFBundleShortVersionString':'0.1','MinimumOSVersion':'17.0','UIDeviceFamily':[2],'UILaunchScreen':{},'UIApplicationSceneManifest':{'UISceneConfigurations':{'UIWindowSceneSessionRoleApplication':[{'UISceneConfigurationName':'Probe','UISceneDelegateClassName':'EngineProbeScene'}]}}}
+info={'CFBundleIdentifier':identity.bundle('engineprobe'),'CFBundleExecutable':'BitwigEngineProbe','CFBundleName':'Bitwig Engine Probe','CFBundlePackageType':'APPL','CFBundleVersion':'1','CFBundleShortVersionString':'0.1','MinimumOSVersion':'17.0','UIDeviceFamily':[2],'UILaunchScreen':{},'UIApplicationSceneManifest':{'UISceneConfigurations':{'UIWindowSceneSessionRoleApplication':[{'UISceneConfigurationName':'Probe','UISceneDelegateClassName':'EngineProbeScene'}]}}}
+info.update(identity.group_info())
 (app/'Info.plist').write_bytes(plistlib.dumps(info))
 evidence='native-engine-device-adaptation.json' if args.device else 'native-engine-adaptation.json'
-(root/'evidence'/evidence).write_text(json.dumps({'original':str(source),'entry_offset':entry,'bundle':str(engine),'dependency_mappings':mapping,'scope':'Loader check; original code unchanged, original file untouched'},indent=2)+'\n')
+(bitwig.evidence/evidence).write_text(json.dumps({'source':source_identity,'adapted_sha256':sha256(engine),'original':str(source),'entry_offset':entry,'bundle':str(engine),'dependency_mappings':mapping,'scope':'Loader check; original code unchanged, original file untouched'},indent=2)+'\n')
 if args.device:
     project={'name':'BitwigEngineProbe','targets':{'BitwigEngineProbe':{
         'type':'application','platform':'iOS','deploymentTarget':'17.0',
         'sources':[{'path':str(root/'probe/native-engine.m')},{'path':str(frameworks),'type':'folder','buildPhase':'resources'},{'path':str(app/'engine-entry.json'),'buildPhase':'resources'}],
-        'settings':{'base':{'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier'],'DEVELOPMENT_TEAM':'YOUR_TEAM_ID','CODE_SIGN_STYLE':'Automatic','INFOPLIST_FILE':str(app/'Info.plist'),'CLANG_ENABLE_OBJC_ARC':'YES','TARGETED_DEVICE_FAMILY':'2','ENABLE_DEBUG_DYLIB':'NO','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/Frameworks'}},
+        'settings':{'base':{'PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier'],'DEVELOPMENT_TEAM':identity.team,'CODE_SIGN_STYLE':'Automatic','INFOPLIST_FILE':str(app/'Info.plist'),'CLANG_ENABLE_OBJC_ARC':'YES','TARGETED_DEVICE_FAMILY':'2','ENABLE_DEBUG_DYLIB':'NO','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/Frameworks'}},
         'postBuildScripts':[{'name':'Sign adapted engine libraries','script':'for lib in "$TARGET_BUILD_DIR/$WRAPPER_NAME/Frameworks/"*; do\n  /usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$lib" || exit $?\ndone','basedOnDependencyAnalysis':False}]
     }}}
+    if identity.app_group:
+        entitlements = build / 'EngineProbe.entitlements'
+        entitlements.write_bytes(plistlib.dumps(identity.group_entitlements()))
+        project['targets']['BitwigEngineProbe']['settings']['base']['CODE_SIGN_ENTITLEMENTS'] = str(entitlements)
     spec=build/'project.json';spec.write_text(json.dumps(project,indent=2))
     run('xcodegen','generate','--spec',spec)
     run('xcodebuild','-project',build/'BitwigEngineProbe.xcodeproj','-scheme','BitwigEngineProbe','-configuration','Debug','-sdk','iphoneos','-destination','generic/platform=iOS','-derivedDataPath',build/'DerivedData','-jobs','4','-allowProvisioningUpdates','build')

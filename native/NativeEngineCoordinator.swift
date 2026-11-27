@@ -1,13 +1,14 @@
 import Foundation
+import AVFAudio
 @_silgen_name("BWEngineProcessStarted") private func processStarted(_ pid:Int32)
 @_silgen_name("BWEngineProcessExited") private func processExited(_ pid:Int32,_ code:Int32)
 @_silgen_name("BWPrepareAudioOutput") private func prepareAudioOutput()->Bool
 @_silgen_name("BWStopAudioOutput") private func stopAudioOutput()
 
-@objc private protocol EngineExtensionFactory {
+@objc protocol EngineExtensionFactory {
     @objc(extensionWithIdentifier:error:) func extensionWithIdentifier(_ identifier:String) throws -> AnyObject
 }
-@objc private protocol EngineExtensionRequest {
+@objc protocol EngineExtensionRequest {
     @objc(beginExtensionRequestWithInputItems:completion:) func begin(_ items:[Any],completion:@escaping(NSUUID?)->Void)
     @objc(pidForRequestIdentifier:) func pid(_ identifier:NSUUID)->Int32
     @objc(setRequestCompletionBlock:) func setCompletion(_ block:@escaping(NSUUID?,[Any]?)->Void)
@@ -20,6 +21,7 @@ import Foundation
 @objc(NativeEngineCoordinator)
 @MainActor final class NativeEngineCoordinator:NSObject {
     private static var active:AnyObject?
+    private static var waitingForMicrophone = false
     private static var currentPID:Int32=0
     private static func record(_ value:[String:Any]) {
         let file=FileManager.default.urls(for:.documentDirectory,in:.userDomainMask)[0].appendingPathComponent("native-engine-extension.json")
@@ -27,7 +29,17 @@ import Foundation
     }
     @objc(startWithArguments:environment:completion:)
     static func start(arguments:[String],environment:[String:String],completion:@escaping(Int32)->Void) {
-        guard active==nil else {completion(0);return}
+        guard active == nil && !waitingForMicrophone else { completion(0); return }
+        if AVAudioApplication.shared.recordPermission == .undetermined {
+            waitingForMicrophone = true
+            AVAudioApplication.requestRecordPermission { _ in
+                DispatchQueue.main.async {
+                    waitingForMicrophone = false
+                    start(arguments: arguments, environment: environment, completion: completion)
+                }
+            }
+            return
+        }
         guard prepareAudioOutput() else {record(["phase":"failed","error":"Foreground audio output initialization failed"]);completion(0);return}
         let url=Bundle.main.builtInPlugInsURL?.appendingPathComponent("BitwigEngine.appex")
         guard let url,let identifier=Bundle(url:url)?.bundleIdentifier else {
@@ -62,7 +74,8 @@ import Foundation
                 processExited(currentPID,-1);started(0)
                 record(["phase":"interrupted","pid":currentPID]);active=nil;currentPID=0
             }}
-            let item=NSExtensionItem();item.userInfo=["bitwig.engine.arguments":arguments,"bitwig.engine.environment":environment]
+            let item=NSExtensionItem();item.userInfo=["bitwig.engine.arguments":arguments,"bitwig.engine.environment":environment,
+                "bitwig.engine.profile":ProcessInfo.processInfo.arguments.contains("--native-dsp-profile")]
             record(["phase":"starting","arguments":arguments])
             request.begin([item]) {identifier in DispatchQueue.main.async {
                 guard active === found else{started(0);return}
