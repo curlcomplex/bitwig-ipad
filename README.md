@@ -71,6 +71,16 @@ Use the same `BITWIG_APP` and identity configuration for all three commands. The
 
 For separately installed plug-ins, add the [independent plug-in runtime options](#install-plug-ins-separately-on-ipad) to the host build.
 
+## Grid oversampling on Bitwig Studio 6.1.7
+
+The optional Grid overlay adds an **DSP rate** choice to the device Inspector for supported Poly Grid, FX Grid and Note Grid patches. Select **1×** to run Grid DSP at the host sample rate, or **4×** for the original rate and default. The setting belongs to each device and is saved with the project. A patch containing a custom source the overlay cannot qualify keeps the stock 4× processing for the whole device. Unmodified Bitwig opens the project at its original rate and drops the overlay-specific setting on re-save.
+
+Use **1×** when the sound suits the patch. Oscillators and nonlinear modules can alias more at the host rate. Algorithms with their own internal oversampling or HQ stages can retain that work. CPU usage depends on the patch. A small patch was benchmarked on iPad, and that measurement does not establish a general CPU saving.
+
+On iPad, use the exact local ARM64 6.1.7 app and add `--grid-rate-overlay` to the device build with `--embedded-engine`. The host loads a separate class overlay before its copied Bitwig JAR. On macOS, the same six-class overlay can be prepared for a locally supplied Patchbay checkout at the pinned commit in the test instructions. Its native loader was checked headlessly. Desktop GUI validation is pending.
+
+Physical iPad checks verified saved Poly Grid cold-open at 1× before opening the Inspector, live insertion of a stock module at 1×, wet FX Grid audio at 1×, and Note Grid output through a downstream Poly Grid at 1×. The source audit classified 233 stock module definitions and materialized 118 distinct transformed source inputs. Device checks exercised stock synchronous compiler results. Native module tests verified routing and controls for selected cases. [Grid test evidence and Patchbay setup](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/tests/grid-rate/README.md)
+
 ## Projects and Master Recording
 
 File → Save stores new projects in `BitwigUser/Projects` in the app's shared container. Reopen them from Recent Projects on the Bitwig Dashboard. Use the master meter's record button to capture the master output, and the adjacent folder button to open the project's `master-recordings` folder and preview the recording.

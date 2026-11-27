@@ -1,6 +1,6 @@
 # Grid rate compatibility tests
 
-These offline tests use an original Bitwig Studio 6.1.7 installation and run its compiler and document codec in a disposable directory. They cover individual source transformations and native-device record serialization. A complete Grid graph, finished selector, and desktop or iPad deployment are outside these tests.
+These offline tests use an original Bitwig Studio 6.1.7 installation and run its compiler and document codec in a disposable directory. They check exact source admission, source transformations, cache isolation, and the native device record codec. Runtime evidence is tracked separately below.
 
 Use a Java 25 or later JDK. Supply `BITWIG_APP` as the original app bundle path and `GRID_SCRATCH` as a fresh writable directory under the ignored local build tree. Copy no Bitwig input, extracted class, compiled IR, or test output into the source tree.
 
@@ -38,7 +38,7 @@ java -Xverify:all -DinstallationRoot="$BITWIG_APP" -Duser.home="$GRID_SCRATCH/ho
 
 To prepare the same class overlay as a single local JAR, run `python3 probe/grid-rate/prepare.py "$BITWIG_APP" "$GRID_SCRATCH/overlay.jar"` with the Java 25 toolchain on `PATH`. The output contains six exact locally patched class definitions and the shared runtime helpers. It is a local build artifact. The normal launcher still uses its original archive.
 
-For a desktop Patchbay file hook, run `python3 probe/grid-rate/prepare.py --patchbay "$BITWIG_APP" "$GRID_SCRATCH/patchbay"`. This writes the six replacements as individual class files, a replacement map, and a helper JAR containing only compatibility classes. The upstream launcher from Patchbay commit `4756a2178276068d488fcde3725eaa6c0ad57e5e` loaded the four replacements and helper classes in the original system class loader during the headless codec check. A desktop GUI session still needs validation. Use an isolated original 6.1.7 app.
+For a desktop Patchbay file hook, run `python3 probe/grid-rate/prepare.py --patchbay "$BITWIG_APP" "$GRID_SCRATCH/patchbay"`. This writes the six replacements as individual class files, a replacement map, and a helper JAR containing only compatibility classes. The upstream launcher from Patchbay commit `4756a2178276068d488fcde3725eaa6c0ad57e5e` loaded all six class replacements and the compatibility helpers through the native JVMTI file hook in the original system class loader during the headless codec check. A desktop GUI session still needs validation. Use an isolated original 6.1.7 app.
 
 ```sh
 BITWIG_CLASS_HOOK_MODE=file \
@@ -48,6 +48,16 @@ BML_TRACE_ENABLED=0 \
   bash "$PATCHBAY_ROOT/loader/src/loader/jvmti/launch-bitwig-agent.sh" "$BITWIG_APP"
 ```
 
-The helper JAR and individual patched files are generated from your local copy. The command leaves that app bundle untouched. This staging path has no active Oversampling row until the whole-graph implementation admits the device.
+The helper JAR and individual patched files are generated from your local copy. The command leaves that app bundle untouched. The Inspector exposes the **DSP rate** choice when the complete graph qualifies for the overlay. The default is 4×.
 
 For an opt-in iPad development package, add `--grid-rate-overlay` to the existing `build-native-host.py --device --embedded-engine` invocation with local 6.1.7. It adds a separate class overlay resource ahead of the unchanged copied stock JAR. Ordinary builds keep their existing classpath.
+
+## Coverage and runtime evidence
+
+The overlay targets the exact stock 6.1.7 source set for Poly Grid, FX Grid and Note Grid. The source audit classified 233 stock module definitions and materialized 118 distinct transformed source inputs. This measures source coverage. The same-process compiler test covers cache separation and byte-identical restored stock IR for the inputs it exercises.
+
+Physical iPad checks covered native selector interaction and persistence and a small patch benchmark. A saved Poly Grid cold-opened at 1× before the Inspector appeared, published 15 compiled assets, and produced 49,178 nonzero output frames. Inserting stock Constant through the original model method grew that graph from three to four modules and compiled the new atom at 1×. FX Grid exposed the native 1× row and produced 49,731 nonzero wet output frames. Note Grid exposed the native 1× row and produced 48,626 nonzero output frames through a downstream Poly Grid with the original Note Thru disabled. The stock codec check verifies that an unmodified app opens the record and drops the overlay field when re-saving.
+
+Long Delay and Comb were wired through the original Grid model in disposable iPad projects. The app displayed the tested Long Delay settings of 100 and 150 ms and the Comb settings of 200 Hz and 18 kHz. The routed graphs ran and produced audio. A Sampler accepted a local fixture WAV and the original model wired its Gate In and stereo output while the FX Grid stayed at 1×. The stock onset analysis subprocess reported a launch error. The recorded test PCM could not be retrieved, so precise delay timing, the Comb FIR transition waveform, and isolated Sampler playback and retrigger behavior remain unverified on hardware.
+
+The same FX Grid published 12 assets at 4× and then 12 at 1× while the transport kept running. The loop was resting during the changes and produced audio again afterwards. An in-flight worker result was not exercised. The pinned Patchbay native file loader check ran headlessly, and desktop GUI validation remains pending.
