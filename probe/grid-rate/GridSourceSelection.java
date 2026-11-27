@@ -8,6 +8,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.stream.Stream;
@@ -16,6 +17,8 @@ import java.util.stream.Stream;
 public final class GridSourceSelection {
     // Absence means the original owner has not completed nJV.
     private static final WeakHashMap<utt,Boolean> admission = new WeakHashMap<>();
+    // A false entry records completed nJV before a dispatcher was available.
+    private static final Map<utt,Boolean> pending = Collections.synchronizedMap(new WeakHashMap<>());
 
     private static final class Policy {
         static final Method oneX = method(utt.class, "bwIsGridOneX");
@@ -65,22 +68,54 @@ public final class GridSourceSelection {
         }
     }
 
+    private static boolean onModelThread(utt owner) {
+        FGj current = Ymy.beI();
+        if (current == null) return false;
+        var dispatcher = owner.waj();
+        return dispatcher == current && dispatcher.isEventDispatchThread();
+    }
+
     public static void modelReady(utt owner) {
+        if (onModelThread(owner)) {
+            completeReadiness(owner,null);
+            return;
+        }
+        if (!GridGraphProfile.isFactory(owner)) return;
+        var dispatcher = owner.waj();
+        var document = owner.cc_();
+        if (dispatcher == null || document == null) {
+            pending.putIfAbsent(owner,false);
+        } else if (!Boolean.TRUE.equals(pending.put(owner,true))) {
+            dispatcher.asyncExec(() -> {
+                if (owner.cc_() == document && owner.waj() == dispatcher &&
+                    onModelThread(owner) && pending.containsKey(owner))
+                    completeReadiness(owner,null);
+                else pending.replace(owner,true,false);
+            });
+        }
+        // Stock project decode can finish nJV before document attachment.
+        // Its first attached source capture completes this pending owner.
+    }
+
+    private static void completeReadiness(utt owner,TLG choosing) {
+        pending.remove(owner);
         if (GridGraphProfile.isFactory(owner)) {
-            setAdmission(owner,GridGraphProfile.qualifies(owner),null);
+            setAdmission(owner,GridGraphProfile.qualifies(owner),choosing);
         } else if (admission.containsKey(owner)) {
-            setAdmission(owner,false,null);
+            setAdmission(owner,false,choosing);
         }
     }
 
     public static void beforeAdd(nWI grid,wh2 node) {
-        if (grid.BBg(utt.class) instanceof utt owner && owner.Qnz() == grid && isAdmitted(owner) &&
+        if (grid.BBg(utt.class) instanceof utt owner && owner.Qnz() == grid && onModelThread(owner) &&
+            isAdmitted(owner) &&
             node instanceof ZFS module && !GridGraphProfile.qualifiedModule(module))
             setAdmission(owner,false,null);
     }
 
     public static void afterAdd(nWI grid,wh2 node) {
-        if (!(grid.BBg(utt.class) instanceof utt owner) || owner.Qnz() != grid || !(node instanceof ZFS module))
+        if (!(grid.BBg(utt.class) instanceof utt owner) || owner.Qnz() != grid ||
+            !onModelThread(owner) || !(node instanceof ZFS module))
             return;
         Boolean qualified = admission.get(owner);
         if (Boolean.FALSE.equals(qualified)) {
@@ -94,7 +129,7 @@ public final class GridSourceSelection {
     }
 
     public static void afterRemove(nWI grid) {
-        if (grid.BBg(utt.class) instanceof utt owner && owner.Qnz() == grid &&
+        if (grid.BBg(utt.class) instanceof utt owner && owner.Qnz() == grid && onModelThread(owner) &&
             Boolean.FALSE.equals(admission.get(owner))) modelReady(owner);
     }
 
@@ -107,7 +142,7 @@ public final class GridSourceSelection {
     }
 
     public static void policyChanged(utt owner) {
-        if (isAdmitted(owner)) recompileOwner(owner,null);
+        if (onModelThread(owner) && isAdmitted(owner)) recompileOwner(owner,null);
     }
 
     private static void recompileOwner(utt owner,TLG choosing) {
@@ -153,8 +188,9 @@ public final class GridSourceSelection {
 
     static vP2 choose(TLG atom, vP2 source) {
         Object ancestor = atom.BBg(utt.class);
-        if (!(ancestor instanceof utt owner) || !isAdmitted(owner) ||
-            !requestedOneX(owner) || !isGridAtom(owner,atom)) return source;
+        if (!(ancestor instanceof utt owner) || !onModelThread(owner)) return source;
+        if (pending.containsKey(owner) && isGridAtom(owner,atom)) completeReadiness(owner,atom);
+        if (!isAdmitted(owner) || !requestedOneX(owner) || !isGridAtom(owner,atom)) return source;
         GridSourceProfile.Rule rule = GridSourceProfile.classify(source);
         if (rule == null) {
             // The actual source can change after initial qualification.
