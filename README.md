@@ -1,6 +1,17 @@
 # Bitwig on iPad
 
-This project runs Bitwig Studio’s original interface and audio engine on iPad. You build it on an Apple silicon Mac using your own copy of Bitwig Studio. This independent project is unaffiliated with Bitwig GmbH.
+This project runs Bitwig Studio’s original interface and audio engine on iPad. You build it on an Apple silicon Mac using your own copy of Bitwig Studio. Installing on a physical iPad requires a paid Apple Developer membership that supports Network Extensions. This independent project is unaffiliated with Bitwig GmbH.
+
+## iPad compatibility
+
+- The current iPad build targets ARM64 Bitwig Studio 6.1.7 and has been tested on an iPad mini (A17 Pro). The original onscreen keyboard supports multitouch, and auxiliary windows open separately from the main workspace.
+- Built-in microphone and speaker audio work. Audio through a Zoom U-44 was tested, and its MIDI ports appeared in Bitwig. MIDI data transfer remains untested.
+- Original plug-in editors are available for supported prepared releases. Plug-ins still require their applicable vendor authorization.
+- Saving and exporting projects require Bitwig activation. Launch on a physical iPad uses a local JIT helper with a trusted developer pairing. Standalone launch after an iPad reboot remains unverified.
+
+[Compatibility details and audio routing](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/docs/compatibility.md)
+
+## Build setup
 
 Use the [current branch, `epic/6.1.7-multitouch`](https://github.com/curlcomplex/bitwig-ipad/tree/epic/6.1.7-multitouch). The default branch contains an older implementation.
 
@@ -9,16 +20,8 @@ git clone --branch epic/6.1.7-multitouch https://github.com/curlcomplex/bitwig-i
 cd bitwig-ipad
 ```
 
-## Use Bitwig
-
-The main workspace fills the scene, while auxiliary windows and supported plug-in editors open in floating panels. The original onscreen keyboard supports multitouch. Caps Lock toggles the computer MIDI keyboard when using a hardware keyboard.
-
-Project saving and export require the applicable Bitwig activation. Use **File → Save** and reopen saved projects from **Recent Projects** on the Dashboard. Use the master meter’s record button to capture the master output, then its folder button to open and preview the WAV. See [compatibility and audio routing](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/docs/compatibility.md).
-
-## Build requirements
-
 - Apple silicon Mac with Xcode, Python 3.10 or newer, and a macOS JDK for JNI headers (use JDK 25 or newer for the 6.1.7 plug-in and Grid options). Set `BITWIG_JDK_HOME` to choose the JDK explicitly.
-- A local ARM64 Bitwig Studio 6.1.4 or 6.1.7 app. The current iPad workflows below target 6.1.7.
+- A local ARM64 Bitwig Studio 6.1.7 app. The builders also accept 6.1.4.
 - A compatible iOS Java 25 runtime at `vendor/java25-ios` with `lib/`, `conf/`, and `release`. See [runtime sources and local inputs](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md).
 
 ```sh
@@ -29,7 +32,7 @@ Builds read your local binaries, leave the originals intact, and print the outpu
 
 ## Install on an iPad
 
-You need XcodeGen, a trusted iPad with Developer Mode enabled, and Apple development signing that supports App Groups and the Network Extensions capability. The Network Extensions capability requires a supported paid Apple Developer membership. The embedded local tunnel uses a trusted developer pairing for JIT. See [Apple’s capability matrix](https://developer.apple.com/help/account/reference/supported-capabilities-ios/) and [helper inputs and attribution](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md).
+You need XcodeGen, a trusted iPad with Developer Mode enabled, and Apple development signing that supports App Groups and the Network Extensions capability. See [Apple’s capability matrix](https://developer.apple.com/help/account/reference/supported-capabilities-ios/) and [helper inputs and attribution](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md).
 
 Set the following environment variables for the same target across all build commands. Keep the bundle prefix and groups when updating an existing installation.
 
@@ -71,7 +74,7 @@ python3 scripts/prepare-plugins.py --library /Library/Audio/Plug-Ins \
 2. Copy each prepared folder directly into **Plug-ins**, keeping its `Package.plist` and contents together.
 3. Return to Bitwig to refresh the browser on 6.1.7. Other supported builds pick up folder changes at the next launch.
 
-Remove a plug-in by removing its prepared folder in Files. Loaded instances keep their current resources until the audio engine restarts. Existing prepared installs migrate to the Files folder once. Preparation preserves the original plug-in identities for saved projects, and vendor authorization still applies. Automatic preparation of original desktop bundles added through Files is tracked in [issue #29](https://github.com/curlcomplex/bitwig-ipad/issues/29).
+Remove a plug-in by removing its prepared folder in Files. Loaded instances keep their current resources until the audio engine restarts. Existing prepared installs migrate to the Files folder once. Preparation preserves the original plug-in identities for saved projects. Automatic preparation of original desktop bundles added through Files is tracked in [issue #29](https://github.com/curlcomplex/bitwig-ipad/issues/29).
 
 For local builds that bundle supported plug-ins inside the signed app, see the options in `python3 scripts/build-native-host.py --help` and the [supported releases and inputs](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/THIRD_PARTY.md).
 
