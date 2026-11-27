@@ -308,6 +308,15 @@ static void setIOSTextInputSession(JNIEnv *env,jclass cls,jobject session) {
 }
 #endif
 
+#ifdef FULL_BITWIG_HOST
+static void BWPostStartupStatus(NSString *phase, NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSNotificationCenter.defaultCenter postNotificationName:@"NativeHostStatus" object:message
+                                                        userInfo:@{@"phase": phase}];
+    });
+}
+#endif
+
 static void runJava(void) {
     NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     [NSFileManager.defaultManager removeItemAtPath:[documents stringByAppendingPathComponent:@"native-exception.txt"] error:nil];
@@ -328,15 +337,24 @@ static void runJava(void) {
         [[NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil] writeToFile:[documents stringByAppendingPathComponent:@"native-java.json"] atomically:YES];
     };
     save();
+#ifdef FULL_BITWIG_HOST
+    BWPostStartupStatus(@"starting", @"Preparing Bitwig…");
+#endif
     NSString *userHome=documents;
 #ifdef EMBEDDED_ENGINE
     NSURL *shared=BWSharedContainerURL();
-    if(!shared){report[@"phase"]=@"shared engine container unavailable";save();return;}
+    if(!shared){
+        report[@"phase"]=@"shared engine container unavailable";save();
+        BWPostStartupStatus(@"restartRequired", @"Shared storage is unavailable. Check the App Group configuration, then reopen Bitwig.");
+        return;
+    }
     userHome=[[shared URLByAppendingPathComponent:@"BitwigUser"] path];
     NSError *sharedError=nil;
     if(![NSFileManager.defaultManager createDirectoryAtPath:userHome withIntermediateDirectories:YES attributes:nil error:&sharedError]){
         report[@"phase"]=@"shared engine home creation failed";
-        report[@"engine_shared_home"]=userHome;report[@"error"]=sharedError.description;save();return;
+        report[@"engine_shared_home"]=userHome;report[@"error"]=sharedError.description;save();
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t open shared storage. Check available space, then reopen Bitwig.");
+        return;
     }
     // Preserve the prototype's existing preferences; pairing records stay private.
     NSString *oldLibrary=[documents stringByAppendingPathComponent:@"Library"];
@@ -368,6 +386,10 @@ static void runJava(void) {
     if(!nativeImage) { const char *error=dlerror();report[@"native_image_error"]=error?@(error):@"unknown load error"; }
     BWCompatibilityTrace("dlopen", "frontend", "libbitwig-jni.jnilib", nativeImage ? "loaded" : "failed");
     save();
+    if(!nativeImage){
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t load the Bitwig frontend. Check the local build and reopen Bitwig.");
+        return;
+    }
     void (*prepareMetal)(void)=dlsym(nativeImage,"BWUIKitPrepareMetal");
     BWCompatibilityTrace("dlsym", "frontend", "BWUIKitPrepareMetal", prepareMetal ? "resolved" : "missing");
     if(prepareMetal)prepareMetal();
@@ -378,13 +400,17 @@ static void runJava(void) {
 #elif defined(FULL_BITWIG_HOST) && !defined(STATIC_ZERO)
     setenv("XNU_HAS_TXM", "1", 1);
     report[@"phase"]=@"waiting for embedded JIT helper";save();
+    BWPostStartupStatus(@"starting", @"Checking the developer connection…");
     dispatch_semaphore_t ready=dispatch_semaphore_create(0);
     __block BOOL prepared=NO;
     dispatch_async(dispatch_get_main_queue(),^{
         Class coordinator=NSClassFromString(@"NativeJITCoordinator");
         void (^completion)(BOOL)=^(BOOL success){prepared=success;dispatch_semaphore_signal(ready);};
         if(coordinator)((void(*)(id,SEL,id))objc_msgSend)(coordinator,@selector(startWithCompletion:),completion);
-        else completion(NO);
+        else {
+            BWPostStartupStatus(@"failed", @"The embedded startup helper is unavailable.");
+            completion(NO);
+        }
     });
     dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
     if(!prepared){report[@"phase"]=@"embedded JIT unavailable";save();return;}
@@ -399,6 +425,9 @@ static void runJava(void) {
     for (NSString *format in discovery)
         setenv([[format stringByAppendingString:@"_PATH"] UTF8String], discovery[format].fileSystemRepresentation, 1);
 #endif
+#ifdef FULL_BITWIG_HOST
+    BWPostStartupStatus(@"runtime", @"Starting the Java runtime…");
+#endif
     setenv("JAVA_HOME", home.fileSystemRepresentation, 1);
 #ifdef STATIC_ZERO
 #ifndef SOURCE_ZERO
@@ -407,17 +436,33 @@ static void runJava(void) {
     jint (*create)(JavaVM**, void**, void*) = JNI_CreateJavaVM;
 #else
     void *library = dlopen([[home stringByAppendingPathComponent:@"lib/server/libjvm.dylib"] fileSystemRepresentation], RTLD_NOW | RTLD_GLOBAL);
-    if (!library) { report[@"error"] = @(dlerror()); BWCompatibilityTrace("dlopen", "frontend", "libjvm.dylib", "failed"); save(); return; }
+    if (!library) {
+        report[@"error"] = @(dlerror()); BWCompatibilityTrace("dlopen", "frontend", "libjvm.dylib", "failed"); save();
+#ifdef FULL_BITWIG_HOST
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t load the Java runtime. Check the local build and reopen Bitwig.");
+#endif
+        return;
+    }
     BWCompatibilityTrace("dlopen", "frontend", "libjvm.dylib", "loaded");
     jint (*create)(JavaVM**, void**, void*) = dlsym(library, "JNI_CreateJavaVM");
     BWCompatibilityTrace("dlsym", "frontend", "JNI_CreateJavaVM", create ? "resolved" : "missing");
-    if (!create) { report[@"error"] = @"JNI_CreateJavaVM not exported"; save(); return; }
+    if (!create) {
+        report[@"error"] = @"JNI_CreateJavaVM not exported"; save();
+#ifdef FULL_BITWIG_HOST
+        BWPostStartupStatus(@"restartRequired", @"The Java runtime is incompatible. Check the local build and reopen Bitwig.");
+#endif
+        return;
+    }
 #endif
     NSString *appBundle = NSBundle.mainBundle.bundlePath;
     NSString *classpath = [NSString stringWithFormat:@"%@/bitwig.jar:%@/libs.jar", appBundle, appBundle];
 #if defined(GRID_RATE_OVERLAY)
     NSString *overlay = [NSBundle.mainBundle pathForResource:@"GridRate" ofType:@"jar"];
-    if (!overlay) { report[@"error"] = @"Grid rate overlay missing"; save(); return; }
+    if (!overlay) {
+        report[@"error"] = @"Grid rate overlay missing"; save();
+        BWPostStartupStatus(@"restartRequired", @"The Grid rate overlay is missing. Check the local build and reopen Bitwig.");
+        return;
+    }
     classpath = [NSString stringWithFormat:@"%@:%@", overlay, classpath];
 #endif
 #if BW_MANAGED_PLUGIN_REFRESH
@@ -463,6 +508,9 @@ static void runJava(void) {
     jint rc = create(&vm, (void**)&env, &arguments);
     report[@"create_result"] = @(rc); save();
     if (rc != JNI_OK) {
+#ifdef FULL_BITWIG_HOST
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t start the Java runtime. Reopen Bitwig to try again.");
+#endif
 #if !TARGET_OS_SIMULATOR && defined(FULL_BITWIG_HOST) && !defined(STATIC_ZERO)
         detachEmbeddedJIT();
 #endif
@@ -475,7 +523,13 @@ static void runJava(void) {
     jmethodID property = (*env)->GetStaticMethodID(env, system, "getProperty", "(Ljava/lang/String;)Ljava/lang/String;");
     jstring key = (*env)->NewStringUTF(env, "java.version");
     jstring version = (*env)->CallStaticObjectMethod(env, system, property, key);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env); report[@"error"]=@"Reading runtime version failed"; save(); return; }
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env); report[@"error"]=@"Reading runtime version failed"; save();
+#ifdef FULL_BITWIG_HOST
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t initialize the Java runtime. Reopen Bitwig to try again.");
+#endif
+        return;
+    }
     const char *utf = (*env)->GetStringUTFChars(env, version, NULL);
     report[@"java_version"] = @(utf); (*env)->ReleaseStringUTFChars(env, version, utf);
 #ifdef STATIC_ZERO
@@ -492,7 +546,9 @@ static void runJava(void) {
 #ifdef EMBEDDED_ENGINE
     if(!BWInstallEngineProcessAdapter(env)){
         if((*env)->ExceptionCheck(env))(*env)->ExceptionDescribe(env);
-        report[@"phase"]=@"embedded engine process adapter failed";save();return;
+        report[@"phase"]=@"embedded engine process adapter failed";save();
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t initialize the iPad host. Reopen Bitwig to try again.");
+        return;
     }
     report[@"engine_process_adapter"]=@"native extension";
 #if BW_MANAGED_PLUGIN_REFRESH
@@ -504,7 +560,9 @@ static void runJava(void) {
     JNINativeMethod registryMethod={"readRegistryStringValue","(Ljava/lang/String;)Ljava/lang/String;",(void*)readIOSRegistryString};
     if(!ioKit||(*env)->RegisterNatives(env,ioKit,&registryMethod,1)!=JNI_OK) {
         if((*env)->ExceptionCheck(env))(*env)->ExceptionDescribe(env);
-        report[@"phase"]=@"iPad device identity adapter failed";save();return;
+        report[@"phase"]=@"iPad device identity adapter failed";save();
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t initialize the iPad host. Reopen Bitwig to try again.");
+        return;
     }
     report[@"device_identity_api"]=@"UIDevice.identifierForVendor";
 #endif
@@ -514,9 +572,12 @@ static void runJava(void) {
     JNINativeMethod textInputMethod={"setCocoaTextInputSession","(Lcom/bitwig/mac_windowing_system/CocoaTextInputSession;)V",(void*)setIOSTextInputSession};
     if(!originalTextInputSession||!setUIKitTextInputActive||!cocoaDisplay||(*env)->RegisterNatives(env,cocoaDisplay,&textInputMethod,1)!=JNI_OK){
         if((*env)->ExceptionCheck(env))(*env)->ExceptionDescribe(env);
-        report[@"phase"]=@"iPad text input adapter failed";save();return;
+        report[@"phase"]=@"iPad text input adapter failed";save();
+        BWPostStartupStatus(@"restartRequired", @"Couldn’t initialize the iPad host. Reopen Bitwig to try again.");
+        return;
     }
     report[@"phase"]=@"initializing BitwigStudioMain";save();
+    BWPostStartupStatus(@"frontend", @"Opening Bitwig Studio…");
     jclass mainClass=(*env)->FindClass(env,"com/bitwig/flt/app/BitwigStudioMain");
     if(mainClass&&!(*env)->ExceptionCheck(env)) {
         jmethodID main=(*env)->GetStaticMethodID(env,mainClass,"main","([Ljava/lang/String;)V");
@@ -530,6 +591,7 @@ static void runJava(void) {
     if((*env)->ExceptionCheck(env)) { (*env)->ExceptionDescribe(env);(*env)->ExceptionClear(env);report[@"phase"]=@"Bitwig startup threw an exception"; }
     else report[@"phase"]=@"Bitwig main returned";
     save();
+    BWPostStartupStatus(@"restartRequired", @"Bitwig closed during startup. Reopen it to try again.");
     (*vm)->DetachCurrentThread(vm);
     return;
 #endif
@@ -549,6 +611,197 @@ static void runJava(void) {
     report[@"phase"] = @"finished"; save();
     (*vm)->DetachCurrentThread(vm);
 }
+#ifdef FULL_BITWIG_HOST
+@interface BWStartupViewController : UIViewController
+@property(nonatomic, copy) void (^launch)(void);
+@end
+
+@implementation BWStartupViewController {
+    UIScrollView *_content;
+    UILabel *_status;
+    UIButton *_action;
+    CAShapeLayer *_scope;
+    BOOL _animated;
+    BOOL _frontendVisible;
+    BOOL _needsTunnelConsent;
+    BOOL _pastHelper;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1];
+
+    _content = [UIScrollView new];
+    _content.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_content];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [_content.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [_content.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [_content.topAnchor constraintEqualToAnchor:safe.topAnchor],
+        [_content.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+    ]];
+
+    UIView *scope = [UIView new];
+    [scope.widthAnchor constraintEqualToConstant:120].active = YES;
+    [scope.heightAnchor constraintEqualToConstant:48].active = YES;
+    _scope = [CAShapeLayer layer];
+    _scope.frame = CGRectMake(0, 0, 120, 48);
+    _scope.fillColor = UIColor.clearColor.CGColor;
+    _scope.strokeColor = [UIColor colorWithRed:1 green:0.42 blue:0.15 alpha:1].CGColor;
+    _scope.lineWidth = 2.5;
+    _scope.lineCap = kCALineCapRound;
+    [scope.layer addSublayer:_scope];
+    _scope.path = [self scopePathAtAmplitude:1].CGPath;
+
+    UILabel *title = [UILabel new];
+    title.text = @"Bitwig Studio";
+    title.textColor = [UIColor colorWithWhite:0.96 alpha:1];
+    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleLargeTitle];
+    title.adjustsFontForContentSizeCategory = YES;
+    title.numberOfLines = 0;
+    title.textAlignment = NSTextAlignmentCenter;
+    title.accessibilityTraits |= UIAccessibilityTraitHeader;
+
+    _status = [UILabel new];
+    _status.text = @"Preparing Bitwig…";
+    _status.textColor = [UIColor colorWithWhite:0.74 alpha:1];
+    _status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    _status.adjustsFontForContentSizeCategory = YES;
+    _status.numberOfLines = 0;
+    _status.textAlignment = NSTextAlignmentCenter;
+
+    _action = [UIButton buttonWithType:UIButtonTypeSystem];
+    _action.tintColor = [UIColor colorWithRed:1 green:0.58 blue:0.37 alpha:1];
+    _action.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    _action.titleLabel.adjustsFontForContentSizeCategory = YES;
+    _action.titleLabel.numberOfLines = 0;
+    _action.titleLabel.textAlignment = NSTextAlignmentCenter;
+    _action.hidden = YES;
+    NSLayoutConstraint *actionHeight = [_action.heightAnchor constraintGreaterThanOrEqualToConstant:44];
+    actionHeight.priority = UILayoutPriorityDefaultHigh;
+    actionHeight.active = YES;
+    [_action addTarget:self action:@selector(resumeStartup) forControlEvents:UIControlEventTouchUpInside];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[scope, title, _status, _action]];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 10;
+    [stack setCustomSpacing:14 afterView:scope];
+    [_content addSubview:stack];
+    UILayoutGuide *frame = _content.frameLayoutGuide;
+    UILayoutGuide *body = _content.contentLayoutGuide;
+    NSLayoutConstraint *viewportHeight = [body.heightAnchor constraintEqualToAnchor:frame.heightAnchor];
+    viewportHeight.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint *width = [stack.widthAnchor constraintEqualToConstant:420];
+    width.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        [body.widthAnchor constraintEqualToAnchor:frame.widthAnchor],
+        [stack.centerXAnchor constraintEqualToAnchor:body.centerXAnchor],
+        [stack.centerYAnchor constraintEqualToAnchor:body.centerYAnchor],
+        [stack.topAnchor constraintGreaterThanOrEqualToAnchor:body.topAnchor constant:24],
+        [body.bottomAnchor constraintGreaterThanOrEqualToAnchor:stack.bottomAnchor constant:24],
+        [body.heightAnchor constraintGreaterThanOrEqualToAnchor:frame.heightAnchor],
+        [stack.widthAnchor constraintLessThanOrEqualToAnchor:frame.widthAnchor constant:-48],
+        [title.widthAnchor constraintLessThanOrEqualToAnchor:stack.widthAnchor],
+        [_status.widthAnchor constraintLessThanOrEqualToAnchor:stack.widthAnchor],
+        [_action.widthAnchor constraintLessThanOrEqualToAnchor:stack.widthAnchor],
+        viewportHeight, width,
+    ]];
+
+    NSNotificationCenter *notifications = NSNotificationCenter.defaultCenter;
+    [notifications addObserver:self selector:@selector(startupStatusChanged:) name:@"NativeHostStatus" object:nil];
+    [notifications addObserver:self selector:@selector(frontendBecameKey:) name:@"NSWindowDidBecomeKeyNotification" object:nil];
+    [notifications addObserver:self selector:@selector(reduceMotionChanged:) name:UIAccessibilityReduceMotionStatusDidChangeNotification object:nil];
+}
+
+- (UIBezierPath *)scopePathAtAmplitude:(CGFloat)amplitude {
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    [path moveToPoint:CGPointMake(2, 24)];
+    [path addLineToPoint:CGPointMake(16, 24)];
+    [path addCurveToPoint:CGPointMake(48, 24)
+            controlPoint1:CGPointMake(28, 24 - 26 * amplitude)
+            controlPoint2:CGPointMake(37, 24 - 26 * amplitude)];
+    [path addCurveToPoint:CGPointMake(83, 24)
+            controlPoint1:CGPointMake(61, 24 + 26 * amplitude)
+            controlPoint2:CGPointMake(72, 24 + 26 * amplitude)];
+    [path addCurveToPoint:CGPointMake(108, 24)
+            controlPoint1:CGPointMake(91, 24 - 11 * amplitude)
+            controlPoint2:CGPointMake(101, 24 - 11 * amplitude)];
+    [path addLineToPoint:CGPointMake(118, 24)];
+    return path;
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (_animated || _frontendVisible) return;
+    _animated = YES;
+    if (UIAccessibilityIsReduceMotionEnabled()) return;
+    CABasicAnimation *draw = [CABasicAnimation animationWithKeyPath:@"path"];
+    draw.fromValue = (__bridge id)[self scopePathAtAmplitude:0].CGPath;
+    draw.duration = 0.65;
+    draw.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_scope addAnimation:draw forKey:@"startupWave"];
+}
+
+- (void)reduceMotionChanged:(NSNotification *)notification {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self reduceMotionChanged:notification]; });
+        return;
+    }
+    if (UIAccessibilityIsReduceMotionEnabled()) [_scope removeAnimationForKey:@"startupWave"];
+}
+
+- (void)startupStatusChanged:(NSNotification *)notification {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self startupStatusChanged:notification]; });
+        return;
+    }
+    if (_frontendVisible) return;
+    NSString *phase = notification.userInfo[@"phase"];
+    if ([phase isEqualToString:@"detached"]) return;
+    if ([phase isEqualToString:@"attached"]) {
+        _pastHelper = YES;
+        _status.text = @"Preparing the Java runtime…";
+        return;
+    }
+    BOOL recoverable = [phase isEqualToString:@"failed"] || [phase isEqualToString:@"blocked"];
+    BOOL needsTunnelConsent = [phase isEqualToString:@"needsTunnelConsent"];
+    if (_pastHelper && (recoverable || needsTunnelConsent || [phase isEqualToString:@"preparing"])) return;
+    _needsTunnelConsent = needsTunnelConsent;
+    if ([phase isEqualToString:@"runtime"]) _pastHelper = YES;
+    _status.text = notification.object;
+    [_action setTitle:_needsTunnelConsent ? @"Enable local tunnel" : @"Retry startup" forState:UIControlStateNormal];
+    _action.hidden = !(_needsTunnelConsent || recoverable);
+    if (!_action.hidden || [phase isEqualToString:@"restartRequired"])
+        UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, _status.text);
+}
+
+- (void)frontendBecameKey:(NSNotification *)notification {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self frontendBecameKey:notification]; });
+        return;
+    }
+    _frontendVisible = YES;
+    [_scope removeAnimationForKey:@"startupWave"];
+    _content.hidden = YES;
+}
+
+- (void)resumeStartup {
+    _action.hidden = YES;
+    if (!_needsTunnelConsent) {
+        _status.text = @"Preparing Bitwig…";
+        self.launch();
+        return;
+    }
+    Class coordinator = NSClassFromString(@"NativeJITCoordinator");
+    void (^completion)(BOOL) = ^(BOOL success) { if (success) self.launch(); };
+    ((void (*)(id,SEL,id))objc_msgSend)(coordinator,@selector(authorizeTunnelWithCompletion:),completion);
+}
+@end
+#endif
+
 @interface JavaProbeScene : UIResponder <UIWindowSceneDelegate>
 @property(strong, nonatomic) UIWindow *window;
 @end
@@ -571,34 +824,17 @@ static void runJava(void) {
 - (void)sceneWillEnterForeground:(UIScene *)scene { [self recordLifecycle:@"entering foreground"]; }
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+    void (^launch)(void) = ^{
+        NSThread *worker = [[NSThread alloc] initWithBlock:^{runJava();}];
+        worker.stackSize = 8*1024*1024;
+        [worker start];
+    };
+#ifdef FULL_BITWIG_HOST
+    BWStartupViewController *vc = [BWStartupViewController new];
+    vc.launch = launch;
+#else
     UIViewController *vc=[UIViewController new]; vc.view.backgroundColor=UIColor.systemBackgroundColor;
     UILabel *label=[[UILabel alloc] initWithFrame:CGRectMake(40,80,700,100)]; label.text=@"Native Java 25 / Bitwig class-loading probe"; [vc.view addSubview:label];
-#ifdef FULL_BITWIG_HOST
-    vc.view.backgroundColor=[UIColor colorWithWhite:0.12 alpha:1];
-    label.text=@"Starting Bitwig…";label.textColor=UIColor.whiteColor;label.numberOfLines=0;
-    label.frame=CGRectMake(32,80,MIN(((UIWindowScene*)scene).coordinateSpace.bounds.size.width-64,650),180);
-    UIButton *retry=[UIButton buttonWithType:UIButtonTypeSystem];retry.frame=CGRectMake(32,270,220,50);
-    __block BOOL needsTunnelConsent=NO;
-    [retry setTitle:@"Retry startup" forState:UIControlStateNormal];retry.hidden=YES;[vc.view addSubview:retry];
-    [retry addAction:[UIAction actionWithHandler:^(UIAction *action){
-        retry.hidden=YES;label.text=@"Starting Bitwig…";
-        void (^launch)(void)=^{NSThread *worker=[[NSThread alloc] initWithBlock:^{runJava();}];worker.stackSize=8*1024*1024;[worker start];};
-        if(needsTunnelConsent) {
-            Class coordinator=NSClassFromString(@"NativeJITCoordinator");
-            void (^completion)(BOOL)=^(BOOL success){if(success)launch();};
-            ((void(*)(id,SEL,id))objc_msgSend)(coordinator,@selector(authorizeTunnelWithCompletion:),completion);
-        } else launch();
-    }] forControlEvents:UIControlEventTouchUpInside];
-    [NSNotificationCenter.defaultCenter addObserverForName:@"NativeHostStatus" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification){
-        label.text=notification.object;
-        needsTunnelConsent=[notification.userInfo[@"phase"] isEqual:@"needsTunnelConsent"];
-        [retry setTitle:needsTunnelConsent?@"Enable local tunnel":@"Retry startup" forState:UIControlStateNormal];
-        retry.hidden=![@[@"failed",@"blocked",@"needsTunnelConsent"] containsObject:notification.userInfo[@"phase"]];
-    }];
-    [NSNotificationCenter.defaultCenter addObserverForName:@"NSWindowDidBecomeKeyNotification" object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *notification){
-        // Once the original frontend is visible, keep the backdrop clear.
-        label.hidden=YES;retry.hidden=YES;
-    }];
 #endif
     self.window.rootViewController=vc; [self.window makeKeyAndVisible];
 #if BW_SURGE_REMOTE
@@ -626,7 +862,7 @@ static void runJava(void) {
         }];
     }
 #endif
-    NSThread *worker=[[NSThread alloc] initWithBlock:^{runJava();}]; worker.stackSize=8*1024*1024; [worker start];
+    launch();
 }
 @end
 @interface JavaProbeDelegate : UIResponder <UIApplicationDelegate>
