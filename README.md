@@ -4,10 +4,17 @@ This project runs Bitwig Studio’s original interface and audio engine on iPad.
 
 ## iPad compatibility
 
-- The current iPad build targets ARM64 Bitwig Studio 6.1.7 and has been tested on an iPad mini (A17 Pro). The original onscreen keyboard supports multitouch, and auxiliary windows open separately from the main workspace.
-- Built-in microphone and speaker audio work. Audio through a Zoom U-44 was tested, and its MIDI ports appeared in Bitwig. MIDI data transfer remains untested.
-- Original plug-in editors are available for supported prepared releases. Plug-ins still require their applicable vendor authorization.
-- Saving and exporting projects require Bitwig activation. Launch on a physical iPad uses a local JIT helper with a trusted developer pairing. Standalone launch after an iPad reboot remains unverified.
+Tested on **iPad mini (A17 Pro), iPadOS 26.6, Bitwig Studio 6.1.7**.
+
+| Area | What works on the iPad | Limits and requirements |
+| --- | --- | --- |
+| Launch | The original interface and audio engine run with the local JIT helper. | Requires Developer Mode and trusted developer pairing. Standalone launch after reboot is unverified. |
+| Input and windows | Multitouch notes on the onscreen keyboard, mouse right-click, hardware keyboard shortcuts, and movable, resizable plug-in editors. | Physical portrait layout remains unverified. |
+| Audio and MIDI | Recording and playback through the built-in microphone and speaker or a Zoom U-44. | The U-44’s MIDI ports appear in Bitwig. Sending and receiving MIDI through them remains untested. |
+| DSP | The audio engine uses multiple cores on the A17 Pro. | Heavier test sessions produced audio underruns. There is no established glitch-free track count. |
+| Desktop plug-ins | Surge XT, CHOW Tape Model, Xfer OTT, Neural Amp Modeler, and supported FabFilter releases load with their original editors. Adding or removing a prepared folder in Files refreshes the browser. | Only specific ARM64 plug-in versions have preparation recipes. Raw desktop bundles require preparation on a Mac. |
+| Projects and recording | Activated projects save and reopen on the iPad. Master Recording produces a playable WAV. | Saving and exporting require Bitwig activation. |
+| Grid DSP rate | The optional 6.1.7 build setting adds per-device 1× and 4× processing to Poly Grid, FX Grid, and Note Grid. | Polymer is outside its scope. 4× is the default. |
 
 [Compatibility details and audio routing](https://github.com/curlcomplex/bitwig-ipad/blob/epic/6.1.7-multitouch/docs/compatibility.md)
 
