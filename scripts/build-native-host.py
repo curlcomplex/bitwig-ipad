@@ -7,6 +7,7 @@ import plistlib
 import re
 import subprocess
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 from bitwig_source import BitwigSource, ENGINE, JNI, ROOT, java_probe_info, sha256
@@ -21,6 +22,8 @@ simulator_argument(parser)
 parser.add_argument('--device',action='store_true',help='Build/sign the native iPad host with its embedded JIT helper')
 parser.add_argument('--embedded-tunnel',action='store_true',help='Include the local developer tunnel in the iPad app; configuration requires its setup button')
 parser.add_argument('--embedded-engine',action='store_true',help='Include the adapted audio engine in its own native extension process')
+parser.add_argument('--grid-rate-overlay', action='store_true',
+                    help='Stage the local Bitwig 6.1.7 Grid rate development classes')
 parser.add_argument('--independent-plugins', action='store_true', help='Include plug-in runtime support and import prepared folders on iPad')
 parser.add_argument('--surge-clap', type=Path, help='Include the supported local Surge XT 1.3.4 desktop CLAP')
 parser.add_argument('--surge-editor-clap-include', type=Path, help='Enable the experimental Surge editor using the official CLAP SDK include directory')
@@ -30,6 +33,8 @@ parser.add_argument('--nam-vst3', type=Path, help='Include the supported local N
 parser.add_argument('--fabfilter-clap', type=Path, action='append', default=[],
                     help='Include a supported FabFilter desktop CLAP bundle (repeatable)')
 bitwig=BitwigSource(parser);args=bitwig.args
+if args.grid_rate_overlay and not (args.device and args.embedded_engine and bitwig.version == '6.1.7'):
+    parser.error('--grid-rate-overlay requires Bitwig 6.1.7 with --device and --embedded-engine')
 if args.fabfilter_clap and not (args.device and args.embedded_engine):
     parser.error('--fabfilter-clap requires --device and --embedded-engine')
 try:
@@ -61,6 +66,7 @@ build_name = 'native-host-tunnel' if args.embedded_tunnel else 'native-host-devi
 if args.embedded_tunnel and not args.embedded_engine: build_name += '-no-engine'
 if args.embedded_engine and not args.embedded_tunnel: build_name += '-engine'
 if args.independent_plugins: build_name += '-independent-plugins'
+if args.grid_rate_overlay: build_name += '-grid-rate-overlay'
 if args.surge_clap: build_name += '-surge'
 if args.surge_editor_clap_include: build_name += '-editor'
 if args.chow_clap: build_name += '-chow'
@@ -238,6 +244,11 @@ if args.embedded_engine:
         helper_path.parent.mkdir(parents=True,exist_ok=True)
         if not helper_path.is_symlink(): helper_path.symlink_to('../../../../../../Frameworks/BitwigPluginHost.bundle')
 for name in ['bitwig.jar','libs.jar']: shutil.copy2(SOURCE/'Java'/name,APP/name)
+if args.grid_rate_overlay:
+    with tempfile.TemporaryDirectory(dir=BUILD) as scratch:
+        grid_overlay = Path(scratch) / 'GridRate.jar'
+        run('python3', ROOT/'probe/grid-rate/prepare.py', SOURCE.parent, grid_overlay)
+        shutil.copy2(grid_overlay, APP/'GridRate.jar')
 resources = APP / 'installation/Contents/Resources'
 if resources.exists(): shutil.rmtree(resources)
 shutil.copytree(SOURCE / 'Resources', resources)
@@ -301,6 +312,10 @@ if args.device:
     resources=[{'path':str(APP/name),'type':'folder','buildPhase':'resources'} for name in ['jre','installation','Frameworks']]
     resources += [{'path':str(BUILD/'Assets.xcassets'),'buildPhase':'resources'}]
     resources += [{'path':str(APP/name),'buildPhase':'resources'} for name in ['bitwig.jar','libs.jar','native-imports.json']]
+    java_defines = ['$(inherited)', 'FULL_BITWIG_HOST=1']
+    if args.grid_rate_overlay:
+        resources.append({'path':str(APP/'GridRate.jar'),'buildPhase':'resources'})
+        java_defines.append('GRID_RATE_OVERLAY=1')
     sign_script='''python3 - <<'PYSIGN'
 import os,pathlib,subprocess
 root=pathlib.Path(os.environ['TARGET_BUILD_DIR'])/os.environ['WRAPPER_NAME']
@@ -315,7 +330,7 @@ PYSIGN'''
       'BitwigNativeHost':{'type':'application','platform':'iOS','deploymentTarget':'26.0',
         'sources':[{'path':str(ROOT/'probe/native-java.m')},{'path':str(ROOT/'native/NativeJITCoordinator.swift')},{'path':str(generated/'JITBuiltIn.swift')},{'path':str(generated/'BitwigJITMessages.swift')},*resources,{'path':str(ROOT/'native/native-java-jit.js'),'buildPhase':'resources'}],
         'dependencies':[{'target':'BitwigJITHelper','embed':True}],
-        'settings':{'base':{**common,'ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier'],'INFOPLIST_FILE':str(APP/'Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Host.entitlements'),'GCC_PREPROCESSOR_DEFINITIONS':['$(inherited)','FULL_BITWIG_HOST=1'],'HEADER_SEARCH_PATHS':jni_headers,'OTHER_LDFLAGS':['$(inherited)','-Wl,-export_dynamic'],'CLANG_ENABLE_OBJC_ARC':'YES'}},
+        'settings':{'base':{**common,'ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier'],'INFOPLIST_FILE':str(APP/'Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Host.entitlements'),'GCC_PREPROCESSOR_DEFINITIONS':java_defines,'HEADER_SEARCH_PATHS':jni_headers,'OTHER_LDFLAGS':['$(inherited)','-Wl,-export_dynamic'],'CLANG_ENABLE_OBJC_ARC':'YES'}},
         'postBuildScripts':[{'name':'Sign native Java and adapted Bitwig libraries','script':sign_script,'basedOnDependencyAnalysis':False}]},
       'BitwigJITHelper':{'type':'app-extension','platform':'iOS','deploymentTarget':'26.0',
         'sources':[{'path':str(generated/name)} for name in ['BitwigJITHelper.swift','BitwigJITMessages.swift','RSDPortScanner.swift','RSDPortResolver.swift']],

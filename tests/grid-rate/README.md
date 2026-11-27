@@ -32,3 +32,19 @@ java -Xverify:all -DinstallationRoot="$BITWIG_APP" -Duser.home="$GRID_SCRATCH/ho
 `GridCacheProof` takes the scratch directory followed by local `.nitrobin` input paths. For each input, the original stock compiler runs a 4×, 1×, 4× sequence in one process. The test requires distinct variant cache identity and byte-identical original LLVM IR at the final 4× step. Configure `java.library.path` to locate the original Bitwig JNI library for this test. On macOS, a scratch link named `libbitwig-jni.dylib` can point to the installed `libbitwig-jni.jnilib`.
 
 `VerifyGridSourceProfile` takes the locally resolved stock embedded Clock Quantize binary as its single argument. Include `$GRID_SCRATCH/policy/classes` before the test classes and stock JARs on its classpath, and set `-DinstallationRoot` to the original app bundle. It checks original source-object kind, archive path and digest, rejection of changed source, and stock pass-through with no admitted graph.
+
+To prepare the same class overlay as a single local JAR, run `python3 probe/grid-rate/prepare.py "$BITWIG_APP" "$GRID_SCRATCH/overlay.jar"` with the Java 25 toolchain on `PATH`. The output contains four exact locally patched class definitions and the shared runtime helpers. It is a local build artifact. The normal launcher still uses its original archive, and the prepared code has no graph admission caller.
+
+For a desktop Patchbay file hook, run `python3 probe/grid-rate/prepare.py --patchbay "$BITWIG_APP" "$GRID_SCRATCH/patchbay"`. This writes the four replacements as individual class files, a replacement map, and a helper JAR containing only compatibility classes. Use the upstream launcher with an isolated original 6.1.7 app.
+
+```sh
+BITWIG_CLASS_HOOK_MODE=file \
+BITWIG_REPLACEMENT_MAP="$GRID_SCRATCH/patchbay/replacement-map.tsv" \
+BITWIG_HELPER_JAR="$GRID_SCRATCH/patchbay/grid-helper.jar" \
+BML_TRACE_ENABLED=0 \
+  bash "$PATCHBAY_ROOT/loader/src/loader/jvmti/launch-bitwig-agent.sh" "$BITWIG_APP"
+```
+
+The helper JAR and individual patched files are generated from your local copy. The command leaves that app bundle untouched. This staging path has no active Oversampling row until the whole-graph implementation admits the device.
+
+For an opt-in iPad development package, add `--grid-rate-overlay` to the existing `build-native-host.py --device --embedded-engine` invocation with local 6.1.7. It adds a separate class overlay resource ahead of the unchanged copied stock JAR. Ordinary builds keep their existing classpath.

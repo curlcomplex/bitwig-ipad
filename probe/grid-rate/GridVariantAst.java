@@ -74,6 +74,7 @@ final class GridVariantAst {
             case "ClockQuantize", "GateLength", "GateRepeat" -> clockGate(declarations,name(root));
             case "GridADSR", "AD", "AR" -> adsr(declarations);
             case "AudioOut" -> audioOut(declarations);
+            case "grid_lifetimer" -> voiceLifeTimer(declarations);
             case "BWLPF", "BWHPF", "BWAPF" -> butterworth(declarations);
             case "LR2", "LR3" -> crossover(declarations,name(root));
             case "tanhClip", "drunk_fold", "e_clip", "gentle_fold", "hardclip2", "s_clip", "wavefolder",
@@ -411,6 +412,26 @@ final class GridVariantAst {
         replaceProcess(declarations,
             "out[0] = enable2 ? fmax(calc(in1[0], 0), calc(in2[0], 1)) : calc(in1[0], 0); " +
             "out[1] = 0; out[2] = 0; out[3] = 0;");
+    }
+
+    private static void voiceLifeTimer(List<Object> declarations) throws ReflectiveOperationException {
+        Object process = find(declarations,"ProcessBlockDeclaration",null);
+        List<Object> locals = collect(process,"VariableDeclaration");
+        Object compare = find(locals,"VariableDeclaration","cmp");
+        Object over = find(locals,"VariableDeclaration","over");
+        if (!print(compare).strip().equals("bool<8> cmp = fabs(in) >= 0.5;") ||
+            !print(over).strip().equals("bool over = cmp.||;"))
+            throw new IllegalStateException("Unexpected stock lifetime reduction");
+
+        Object source = find(fragment("process { bool over = fabs(in[0]) >= 0.5 || fabs(in[1]) >= 0.5; }"),
+            "ProcessBlockDeclaration",null);
+        Object replacement = find(collect(source,"VariableDeclaration"),"VariableDeclaration","over");
+        Field initializer = field(type("VariableDeclaration"),"Bqk");
+        initializer.set(over, initializer.get(replacement));
+        for (Object block : collect(process,"BlockStatement")) {
+            if (blockList(block,"beI").remove(compare)) return;
+        }
+        throw new IllegalStateException("Expected stock lifetime condition scope");
     }
 
     private static void butterworth(List<Object> declarations) throws ReflectiveOperationException {
