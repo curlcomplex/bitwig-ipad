@@ -12,14 +12,6 @@ static inline NSURL *BWPreparedPluginRoot(void) {
     return [BWSharedContainerURL() URLByAppendingPathComponent:@"Prepared Plug-ins" isDirectory:YES];
 }
 
-static inline NSURL *BWPreparedPluginRegistry(void) {
-    return [BWPreparedPluginRoot() URLByAppendingPathComponent:@"Installed.plist"];
-}
-
-static inline NSDictionary *BWReadPreparedPluginRegistry(void) {
-    return [NSDictionary dictionaryWithContentsOfURL:BWPreparedPluginRegistry()] ?: @{};
-}
-
 static inline NSString *BWPreparedPluginImageName(NSString *name) {
     if ([name isEqualToString:@"Surge XT.clap"]) return @"SurgeXT.bundle";
     if ([name isEqualToString:@"CHOWTapeModel.clap"]) return @"CHOWTapeModel.bundle";
@@ -37,12 +29,17 @@ static inline NSString *BWPreparedPluginImageName(NSString *name) {
     return nil;
 }
 
-static inline NSURL *BWPreparedPluginDirectory(NSURL *bundle) {
+static inline BOOL BWIsManagedPreparedPluginBundle(NSURL *bundle) {
     NSString *name=bundle.lastPathComponent;
-    if (!BWPreparedPluginImageName(name)) return nil;
+    if (!BWPreparedPluginImageName(name)) return NO;
     NSURL *format=[BWManagedPluginRoot() URLByAppendingPathComponent:name.pathExtension.uppercaseString isDirectory:YES];
     NSURL *expected=[format URLByAppendingPathComponent:name isDirectory:YES];
-    if (![bundle.URLByStandardizingPath.path isEqualToString:expected.URLByStandardizingPath.path]) return nil;
+    return [bundle.URLByStandardizingPath.path isEqualToString:expected.URLByStandardizingPath.path];
+}
+
+static inline NSURL *BWPreparedPluginDirectory(NSURL *bundle) {
+    if (!BWIsManagedPreparedPluginBundle(bundle)) return nil;
+    NSString *name=bundle.lastPathComponent;
     NSURL *contents=[bundle URLByAppendingPathComponent:@"Contents" isDirectory:YES].URLByResolvingSymlinksInPath;
     NSURL *owner=contents.URLByDeletingLastPathComponent;
     NSURL *generation=owner.URLByDeletingLastPathComponent;
@@ -52,3 +49,6 @@ static inline NSURL *BWPreparedPluginDirectory(NSURL *bundle) {
         return nil;
     return generation;
 }
+
+NSURL *BWPreparedPluginFilesFolder(void);
+NSDictionary *BWPreparedPluginCatalog(NSDictionary *previous);
