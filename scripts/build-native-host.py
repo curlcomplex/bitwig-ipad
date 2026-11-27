@@ -339,7 +339,7 @@ PYSIGN'''
     project={'name':'BitwigNativeHost','targets':{
       'BitwigNativeHost':{'type':'application','platform':'iOS','deploymentTarget':'26.0',
         'sources':[{'path':str(ROOT/'probe/native-java.m')},{'path':str(ROOT/'native/NativeJITCoordinator.swift')},{'path':str(generated/'JITBuiltIn.swift')},{'path':str(generated/'BitwigJITMessages.swift')},*resources,{'path':str(ROOT/'native/native-java-jit.js'),'buildPhase':'resources'}],
-        'dependencies':[{'target':'BitwigJITHelper','embed':True}],
+        'dependencies':[{'target':'BitwigJITHelper','embed':True},{'sdk':'QuartzCore.framework'}],
         'settings':{'base':{**common,'ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','PRODUCT_BUNDLE_IDENTIFIER':info['CFBundleIdentifier'],'INFOPLIST_FILE':str(APP/'Info.plist'),'CODE_SIGN_ENTITLEMENTS':str(BUILD/'Host.entitlements'),'GCC_PREPROCESSOR_DEFINITIONS':java_defines,'HEADER_SEARCH_PATHS':jni_headers,'OTHER_LDFLAGS':['$(inherited)','-Wl,-export_dynamic'],'CLANG_ENABLE_OBJC_ARC':'YES'}},
         'postBuildScripts':[{'name':'Sign native Java and adapted Bitwig libraries','script':sign_script,'basedOnDependencyAnalysis':False}]},
       'BitwigJITHelper':{'type':'app-extension','platform':'iOS','deploymentTarget':'26.0',
@@ -415,7 +415,7 @@ PYSIGN'''
     run('xcodebuild','-project',BUILD/'BitwigNativeHost.xcodeproj','-scheme','BitwigNativeHost','-configuration','Debug','-sdk','iphoneos','-destination','generic/platform=iOS','-derivedDataPath',BUILD/'DerivedData','-jobs','4','-allowProvisioningUpdates','build')
     print(BUILD/'DerivedData/Build/Products/Debug-iphoneos/BitwigNativeHost.app')
     raise SystemExit(0)
-run(*CC,'-fobjc-arc','-DFULL_BITWIG_HOST',*[f'-I{path}' for path in jni_headers],'-framework','UIKit','-framework','Foundation','-Wl,-rpath,@executable_path/Frameworks',ROOT/'probe/native-java.m','-o',APP/'BitwigNativeHost')
+run(*CC,'-fobjc-arc','-DFULL_BITWIG_HOST',*[f'-I{path}' for path in jni_headers],'-framework','UIKit','-framework','Foundation','-framework','QuartzCore','-Wl,-rpath,@executable_path/Frameworks',ROOT/'probe/native-java.m','-o',APP/'BitwigNativeHost')
 run('codesign','--force','--sign','-',APP)
 if args.run:
     subprocess.run(['xcrun','simctl','terminate',simulator,info['CFBundleIdentifier']],capture_output=True)

@@ -48,7 +48,7 @@ enum BitwigLog {
 
     @objc static func authorizeTunnel(completion: @escaping (Bool) -> Void) {
 #if EMBEDDED_TUNNEL
-        status("preparing", "Waiting for permission to configure Bitwig’s on-device developer tunnel.")
+        status("preparing", "Waiting for local tunnel permission…")
         NativeTunnelCoordinator.ensureReady(allowConfiguration: true) { result in
             switch result {
             case .success: completion(true)
@@ -83,9 +83,9 @@ enum BitwigLog {
             guard !delivered else{return};delivered=true;timer?.invalidate();timer=nil;completion(success)
         }
 #if EMBEDDED_TUNNEL
-        status("preparing","Preparing Java execution through Bitwig’s embedded helper and local developer tunnel.")
+        status("preparing","Connecting to the local developer tunnel…")
 #else
-        status("preparing","Preparing Java execution through the app's embedded JIT helper. LocalDevVPN must be active.")
+        status("preparing","Connecting to the developer helper. Keep LocalDevVPN active.")
 #endif
         let request=BitwigJITRequest.enable(targetPID:getpid(),pairingData:pairing,scriptBase64:script.base64EncodedString())
         BitwigBuiltInJIT.send(request,started:{
@@ -106,7 +106,7 @@ enum BitwigLog {
 #if EMBEDDED_TUNNEL
                 if !response.success && !delivered && recoverTransport && response.message.contains("Timed out connecting to 10.7.0.1") {
                     delivered=true;timer?.invalidate();timer=nil
-                    status("preparing","Reconnecting the local developer tunnel after a connection timeout.")
+                    status("preparing","Reconnecting the local developer tunnel…")
                     NativeTunnelCoordinator.reconnect { result in
                         switch result {
                         case .success: prepareHelper(recoverTransport:false,completion:completion)
