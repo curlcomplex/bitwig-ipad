@@ -20,6 +20,7 @@ final class PatchGridPolicy implements Opcodes {
     private static final String FIELD="bwGridOneX";
     private static final String SETTER="bwSetGridOneX";
     private static final String GETTER="bwIsGridOneX";
+    private static final String OBSERVERS="bwGridPolicyObservers";
     static final String PROPERTY="bitwigipad_grid_one_x";
     private static final int STOCK_ACTIVE_STYLE=410;
 
@@ -58,8 +59,13 @@ final class PatchGridPolicy implements Opcodes {
                     accessor(this,ACC_PUBLIC,"sCA",true,false);
                     accessor(this,ACC_PUBLIC,"Gef",false,false);
                     accessor(this,ACC_PUBLIC,"sCA",false,false);
+                    observerDispatch(this,"wLf","bwAddGridPolicyListener");
+                    observerDispatch(this,"tWW","bwRemoveGridPolicyListener");
                 } else {
                     super.visitField(0,FIELD,"Z",null,null).visitEnd();
+                    super.visitField(ACC_PRIVATE,OBSERVERS,"LuLF;",null,null).visitEnd();
+                    observerAccessor(this,true);
+                    observerAccessor(this,false);
                     getter(this);
                     setter(this);
                 }
@@ -126,6 +132,60 @@ final class PatchGridPolicy implements Opcodes {
         method.visitEnd();
     }
 
+    private static void observerDispatch(ClassVisitor visitor, String name, String implementation) {
+        String descriptor = "(Lcom/bitwig/ramona/core/IqI;ILNVD;)V";
+        MethodVisitor method = visitor.visitMethod(ACC_PUBLIC,name,descriptor,null,null);
+        Label original = new Label();
+        method.visitCode();
+        method.visitVarInsn(ILOAD,2);
+        method.visitJumpInsn(IFNE,original);
+        method.visitVarInsn(ALOAD,1);
+        method.visitTypeInsn(CHECKCAST,UTT);
+        method.visitVarInsn(ALOAD,3);
+        method.visitMethodInsn(INVOKEVIRTUAL,UTT,implementation,"(LNVD;)V",false);
+        method.visitInsn(RETURN);
+        method.visitLabel(original);
+        method.visitFrame(F_SAME,0,null,0,null);
+        method.visitVarInsn(ALOAD,0);
+        method.visitVarInsn(ALOAD,1);
+        method.visitVarInsn(ILOAD,2);
+        method.visitVarInsn(ALOAD,3);
+        method.visitMethodInsn(INVOKESPECIAL,SUPER,name,descriptor,false);
+        method.visitInsn(RETURN);
+        method.visitMaxs(0,0);
+        method.visitEnd();
+    }
+
+    private static void observerAccessor(ClassVisitor visitor, boolean add) {
+        String name = add ? "bwAddGridPolicyListener" : "bwRemoveGridPolicyListener";
+        MethodVisitor method = visitor.visitMethod(ACC_FINAL,name,"(LNVD;)V",null,null);
+        Label target = new Label();
+        method.visitCode();
+        method.visitVarInsn(ALOAD,0);
+        method.visitFieldInsn(GETFIELD,UTT,OBSERVERS,"LuLF;");
+        method.visitJumpInsn(add ? IFNONNULL : IFNULL,target);
+        if (add) {
+            method.visitVarInsn(ALOAD,0);
+            method.visitTypeInsn(NEW,"uLF");
+            method.visitInsn(DUP);
+            method.visitMethodInsn(INVOKESPECIAL,"uLF","<init>","()V",false);
+            method.visitFieldInsn(PUTFIELD,UTT,OBSERVERS,"LuLF;");
+            method.visitLabel(target);
+            method.visitFrame(F_SAME,0,null,0,null);
+        }
+        method.visitVarInsn(ALOAD,0);
+        method.visitFieldInsn(GETFIELD,UTT,OBSERVERS,"LuLF;");
+        method.visitVarInsn(ALOAD,1);
+        method.visitMethodInsn(INVOKEVIRTUAL,"uLF",add ? "addListener" : "removeListener","(LNVD;)V",false);
+        if (!add) {
+            method.visitLabel(target);
+            method.visitFrame(F_SAME,0,null,0,null);
+        }
+        method.visitInsn(RETURN);
+        method.visitMaxs(0,0);
+        method.visitEnd();
+    }
+
     private static void getter(ClassVisitor visitor) {
         MethodVisitor method=visitor.visitMethod(ACC_PUBLIC | ACC_FINAL,GETTER,"()Z",null,null);
         method.visitCode();
@@ -154,6 +214,21 @@ final class PatchGridPolicy implements Opcodes {
         method.visitFieldInsn(PUTFIELD,UTT,FIELD,"Z");
         method.visitVarInsn(ALOAD,0);
         method.visitMethodInsn(INVOKESTATIC,"GridSourceSelection","policyChanged","(L"+UTT+";)V",false);
+        method.visitVarInsn(ALOAD,0);
+        method.visitFieldInsn(GETFIELD,UTT,OBSERVERS,"LuLF;");
+        method.visitJumpInsn(IFNULL,done);
+        method.visitVarInsn(ALOAD,0);
+        method.visitFieldInsn(GETFIELD,UTT,OBSERVERS,"LuLF;");
+        method.visitFieldInsn(GETSTATIC,AIR,DESCRIPTOR,"LdfB;");
+        method.visitVarInsn(ALOAD,0);
+        method.visitMethodInsn(INVOKEVIRTUAL,"dfB","beI","(Lcom/bitwig/ramona/core/ytz;)Lcom/bitwig/ramona/core/Pv;",false);
+        method.visitVarInsn(ILOAD,1);
+        method.visitMethodInsn(INVOKESTATIC,"java/lang/Boolean","valueOf","(Z)Ljava/lang/Boolean;",false);
+        method.visitVarInsn(ILOAD,1);
+        method.visitInsn(ICONST_1);
+        method.visitInsn(IXOR);
+        method.visitMethodInsn(INVOKESTATIC,"java/lang/Boolean","valueOf","(Z)Ljava/lang/Boolean;",false);
+        method.visitMethodInsn(INVOKEVIRTUAL,"uLF","fireValueChanged","(LuB1;Ljava/lang/Object;Ljava/lang/Object;)V",false);
         method.visitLabel(done);
         method.visitFrame(F_SAME,0,null,0,null);
         method.visitInsn(RETURN);

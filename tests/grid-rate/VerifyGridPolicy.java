@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.ArrayList;
 
 final class VerifyGridPolicy {
     private static final String PROPERTY="bitwigipad_grid_one_x";
@@ -66,8 +67,17 @@ final class VerifyGridPolicy {
         require(!named(absent) && !field.Bqk(read(schema,absent)),"old stock absent defaults to 4x");
         require(!field.Bqk(first) && !field.Bqk(second),"independent defaults");
         byte[] fileDefault=serialize(first,config,qAF.sCA);
+        var changes = new ArrayList<MNh>();
+        NVD observer = event -> changes.add((MNh)event);
+        field.beI(first,observer);
+        field.sCA(first,true);
         field.sCA(first,true);
         require(field.Bqk(first) && !field.Bqk(second),"independent normal transaction");
+        require(changes.size()==1 && Boolean.TRUE.equals(changes.getFirst().Gef()) &&
+            Boolean.FALSE.equals(changes.getFirst().MgQ()),"original observer gets one true change");
+        field.sCA(second,true);
+        field.sCA(second,false);
+        require(changes.size()==1,"other device did not notify first observer");
         byte[] fileSelected=serialize(first,config,qAF.sCA);
         Files.write(Path.of(args[1],"default.obj"),fileDefault);
         Files.write(Path.of(args[1],"selected.obj"),fileSelected);
@@ -80,6 +90,11 @@ final class VerifyGridPolicy {
         require(cloned!=first && field.Bqk(cloned),"stock copy");
         field.sCA(first,false);
         require(!field.Bqk(first) && field.Bqk(cloned),"independent after clone");
+        require(changes.size()==2 && Boolean.FALSE.equals(changes.getLast().Gef()) &&
+            Boolean.TRUE.equals(changes.getLast().MgQ()),"original observer gets one false change");
+        field.Gef(first,observer);
+        field.sCA(first,true);
+        require(changes.size()==2,"removed original observer stayed silent");
         System.out.println("Two native-devices, normal txn, named wire ID0 roundtrip and stock clone passed");
     }
 }
