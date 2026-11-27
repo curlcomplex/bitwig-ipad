@@ -16,7 +16,7 @@ final class GridInspectorRow {
         rows.IvP(aMZ.beI("Oversampling", (String)null, control));
     }
 
-    private static final class Choice implements uB1 {
+    static final class Choice implements uB1 {
         private final utt device;
         private final dfB field;
         private final Map<NVD,NVD> listeners = new IdentityHashMap<>();
@@ -29,6 +29,10 @@ final class GridInspectorRow {
         @Override
         public Object getValue() {
             return field.Bqk(device) ? HOST : STOCK;
+        }
+
+        private static String label(Object value) {
+            return Boolean.TRUE.equals(value) ? HOST : STOCK;
         }
 
         @Override
@@ -51,7 +55,10 @@ final class GridInspectorRow {
         @Override
         public void addListener(NVD listener) {
             if (listeners.containsKey(listener)) return;
-            NVD relay = ignored -> listener.eventOccurred(getValue());
+            NVD relay = event -> {
+                MNh change = (MNh)event;
+                listener.eventOccurred(new MNh(this,label(change.Gef()),label(change.MgQ())));
+            };
             field.beI(device, relay);
             listeners.put(listener, relay);
         }

@@ -1,6 +1,7 @@
 import com.bitwig.base.serial.binary.SJF;
 import com.bitwig.flt.document.core.master.fix;
 import com.bitwig.flt.document.core.master.device.AiR;
+import com.bitwig.flt.document.core.master.device.utt;
 import com.bitwig.ramona.core.tjc;
 import com.bitwig.ramona.core.ytz;
 import java.io.ByteArrayInputStream;
@@ -70,6 +71,10 @@ final class VerifyGridPolicy {
         var changes = new ArrayList<MNh>();
         NVD observer = event -> changes.add((MNh)event);
         field.beI(first,observer);
+        var choice = new GridInspectorRow.Choice((utt)first,field);
+        var choiceChanges = new ArrayList<MNh>();
+        NVD choiceObserver = event -> choiceChanges.add((MNh)event);
+        choice.addListener(choiceObserver);
         field.sCA(first,true);
         field.sCA(first,true);
         require(field.Bqk(first) && !field.Bqk(second),"independent normal transaction");
@@ -92,8 +97,13 @@ final class VerifyGridPolicy {
         require(!field.Bqk(first) && field.Bqk(cloned),"independent after clone");
         require(changes.size()==2 && Boolean.FALSE.equals(changes.getLast().Gef()) &&
             Boolean.TRUE.equals(changes.getLast().MgQ()),"original observer gets one false change");
+        require(choiceChanges.size()==2 && choiceChanges.getFirst().beI()==choice && "1×".equals(choiceChanges.getFirst().Gef()) &&
+            "4×".equals(choiceChanges.getFirst().MgQ()) && "4×".equals(choiceChanges.getLast().Gef()) &&
+            "1×".equals(choiceChanges.getLast().MgQ()),"stock UI event observes translated old and new values");
+        choice.removeListener(choiceObserver);
         field.Gef(first,observer);
         field.sCA(first,true);
+        require(choiceChanges.size()==2,"removed native choice observer stayed silent");
         require(changes.size()==2,"removed original observer stayed silent");
         System.out.println("Two native-devices, normal txn, named wire ID0 roundtrip and stock clone passed");
     }
